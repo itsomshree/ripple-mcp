@@ -1,0 +1,125 @@
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class NodeType(StrEnum):
+    FILE = "File"
+    FUNCTION = "Function"
+    CLASS = "Class"
+    API_ENDPOINT = "APIEndpoint"
+    DB_TABLE = "DBTable"
+    TEST = "Test"
+
+
+class EdgeType(StrEnum):
+    CALLS = "CALLS"
+    DEFINED_IN = "DEFINED_IN"
+    HANDLES = "HANDLES"
+    QUERIES = "QUERIES"
+    TESTS = "TESTS"
+    IMPORTS = "IMPORTS"
+
+
+def file_id(path: str) -> str:
+    return path
+
+
+def symbol_id(path: str, qualname: str) -> str:
+    return f"{path}::{qualname}"
+
+
+def endpoint_id(method: str, route: str) -> str:
+    return f"endpoint::{method.upper()} {route}"
+
+
+def table_id(name: str) -> str:
+    return f"table: {name.lower()}"
+
+
+class _Node(BaseModel):
+    id: str
+    name: str
+
+    def to_properties(self) -> dict:
+        return self.model_dump(mode="json", exclude_none=True, exclude={"type"})
+
+
+class SymbolNode(_Node):
+    qualname: str
+    file_path: str
+    line_start: int
+    line_end: int
+
+
+class FileNode(_Node):
+    type: Literal[NodeType.FILE] = NodeType.FILE
+    path: str
+    content_hash: str
+    is_test: bool = False
+
+
+class FunctionNode(SymbolNode):
+    type: Literal[NodeType.FUNCTION] = NodeType.FUNCTION
+    is_async: bool = False
+    class_name: str | None = None
+    decorators: list[str] = Field(default_factory=list)
+
+
+class ClassNode(SymbolNode):
+    type: Literal[NodeType.CLASS] = NodeType.CLASS
+    bases: list[str] = Field(default_factory=list)
+
+
+class APIEndpointNode(_Node):
+    type: Literal[NodeType.API_ENDPOINT] = NodeType.API_ENDPOINT
+    method: str
+    route: str
+
+
+class DBTableNode(_Node):
+    type: Literal[NodeType.DB_TABLE] = NodeType.DB_TABLE
+
+
+class TestNode(SymbolNode):
+    type: Literal[NodeType.TEST] = NodeType.TEST
+
+
+Node = Annotated[
+    FileNode | FunctionNode | ClassNode | APIEndpointNode | DBTableNode | TestNode,
+    Field(discriminator="type"),
+]
+
+
+class Edge(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    type: EdgeType
+    src: str
+    dst: str
+
+
+class CallRef(BaseModel):
+    caller_id: str
+    target: str
+    line: int
+
+
+class ImportRef(BaseModel):
+    module: str
+    names: list[tuple[str, str | None]] = Field(default_factory=list)
+    alias: str | None = None
+    level: int = 0
+    line: int
+
+
+class ParsedFile(BaseModel):
+    path: str
+    nodes: list[Node] = Field(default_factory=list)
+    edges: list[Edge] = Field(default_factory=list)
+    calls: list[CallRef] = Field(default_factory=list)
+    imports: list[ImportRef] = Field(default_factory=list)
+    error: str | None = None
