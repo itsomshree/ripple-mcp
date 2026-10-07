@@ -108,6 +108,21 @@ class CallRef(BaseModel):
     line: int
 
 
+class UnresolvedReason(StrEnum):
+    EXTERNAL = "external"
+    BUILTIN = "builtin"
+    UNKNOWN_RECEIVER = "unknown_receiver"
+    AMBIGUOUS = "ambiguous"
+    NOT_FOUND = "not_found"
+
+
+class UnresolvedCall(BaseModel):
+    caller_id: str
+    target: str
+    line: int
+    reason: UnresolvedReason
+
+
 class ImportRef(BaseModel):
     module: str
     names: list[tuple[str, str | None]] = Field(default_factory=list)
