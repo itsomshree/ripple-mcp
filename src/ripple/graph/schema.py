@@ -108,6 +108,14 @@ class CallRef(BaseModel):
     line: int
 
 
+class RouteRef(BaseModel):
+    handler_id: str
+    receiver: str
+    method: str
+    path: str
+    line: int
+
+
 class UnresolvedReason(StrEnum):
     EXTERNAL = "external"
     BUILTIN = "builtin"
