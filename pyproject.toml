@@ -28,3 +28,10 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.16.9",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/integration"]
+norecursedirs = ["fixtures"]
+
+[tool.ruff]
+extend-exclude = ["tests/fixtures"]
