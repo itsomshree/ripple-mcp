@@ -98,6 +98,7 @@ class Binding:
     module: str
     file: str | None
     symbol: str | None = None
+    name: str | None = field(default=None, compare=False)
 
 
 @dataclass
@@ -157,13 +158,13 @@ class ModuleResolver:
         seen = _seen if _seen is not None else set()
         mod_file = self.index.resolve(module)
 
-        if (module, name) in seen:  # re-export cycle
-            return Binding("symbol", module, mod_file, None)
+        if (module, name) in seen:
+            return Binding("symbol", module, mod_file, None, name)
         seen.add((module, name))
 
         if mod_file is not None:
             if name in self.top_level[mod_file]:
-                return Binding("symbol", module, mod_file, name)
+                return Binding("symbol", module, mod_file, name, name)
             reexport = self._from_imports[mod_file].get(name)
             if reexport is not None:
                 return self.resolve_from(*reexport, _seen=seen)
@@ -179,8 +180,8 @@ class ModuleResolver:
         if sub_file is not None:
             return Binding("module", sub, sub_file)
         if mod_file is not None:
-            return Binding("symbol", module, mod_file, None)
-        return Binding("symbol", module, None, name)  # external
+            return Binding("symbol", module, mod_file, None, name)
+        return Binding("symbol", module, None, name, name)  # external
 
     # internals
     def _resolve_imports(self, path: str) -> FileImports:
