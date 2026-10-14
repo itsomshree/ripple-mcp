@@ -146,3 +146,61 @@ class ParsedFile(BaseModel):
     calls: list[CallRef] = Field(default_factory=list)
     imports: list[ImportRef] = Field(default_factory=list)
     error: str | None = None
+
+
+class RouterKind(StrEnum):
+    APP = "app"
+    ROUTER = "router"
+
+
+class RouterDecl(BaseModel):
+    file_path: str
+    var: str
+    ctor: str
+    kind: RouterKind
+    prefix: str | None
+    line: int
+
+
+class MountRef(BaseModel):
+    file_path: str
+    parent: str
+    child: str
+    prefix: str | None
+    line: int
+
+
+class FastAPIFacts(BaseModel):
+    path: str
+    routes: list[RouteRef] = Field(default_factory=list)
+    routers: list[RouterDecl] = Field(default_factory=list)
+    mounts: list[MountRef] = Field(default_factory=list)
+
+
+class RouteIssueReason(StrEnum):
+    UNKNOWN_RECEIVER = "unknown_receiver"
+    UNRESOLVED_MOUNT = "unresolved_mount"
+    NON_LITERAL_PREFIX = "non_literal_prefix"
+    MOUNT_CYCLE = "mount_cycle"
+
+
+class RouteIssue(BaseModel):
+    file_path: str
+    line: int
+    subject: str
+    reason: RouteIssueReason
+
+
+class ResolvedRoute(BaseModel):
+    handler_id: str
+    method: str
+    path: str
+    declared_path: str
+    line: int
+    exact: bool
+    mounted: bool
+
+
+class RouteResolution(BaseModel):
+    routes: list[ResolvedRoute] = Field(default_factory=list)
+    issues: list[RouteIssue] = Field(default_factory=list)
