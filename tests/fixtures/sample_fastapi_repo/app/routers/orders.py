@@ -1,6 +1,5 @@
-from fastapi import APIRouter
-
 from app.services.order_service import OrderService
+from fastapi import APIRouter
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -12,4 +11,4 @@ def get_order(order_id: int):
 
 @router.post("", status_code=201)
 def place_order(user_id: int, items: list[str]):
-    return OrderService.place(user_id), items
+    return OrderService.place(user_id, items)
