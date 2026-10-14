@@ -4,8 +4,13 @@ from pathlib import Path
 import pytest
 
 from ripple.graph.builder import GraphBuilder
-from ripple.graph.schema import EdgeType, UnresolvedReason
-from ripple.parsers.fastapi_parser import parse_routes_file, parse_routes_source
+from ripple.graph.schema import EdgeType, RouterKind, UnresolvedReason
+from ripple.parsers.fastapi_parser import (
+    parse_fastapi_file,
+    parse_fastapi_source,
+    parse_routes_file,
+    parse_routes_source,
+)
 from ripple.parsers.python_parser import parse_python_file, parse_python_source
 
 PATH = "app/routes.py"
@@ -18,6 +23,22 @@ def routes(src: str, path: str = PATH):
 
 def triples(src: str):
     return [(r.method, r.path, r.handler_id.partition("::")[2]) for r in routes(src)]
+
+
+def fixture_files():
+    return sorted(FIXTURE.rglob("*.py"), key=lambda p: p.as_posix())
+
+
+def facts(src: str, path: str = PATH):
+    return parse_fastapi_source(textwrap.dedent(src).lstrip("\n"), path)
+
+
+def decls(src: str):
+    return [(d.var, d.ctor, d.kind, d.prefix) for d in facts(src).routers]
+
+
+def mounts(src: str):
+    return [(m.parent, m.child, m.prefix) for m in facts(src).mounts]
 
 
 @pytest.mark.parametrize(
@@ -87,7 +108,8 @@ def test_multiline_decorator_line_is_decorator_start():
 
 
 def test_non_route_decorators_are_ignored():
-    assert routes("""
+    assert (
+        routes("""
         @property
         def a(self): ...
 
@@ -105,11 +127,14 @@ def test_non_route_decorators_are_ignored():
 
         @handlers["x"].get("/y")
         def f(): ...
-        """) == []
+        """)
+        == []
+    )
 
 
 def test_non_literal_paths_are_skipped():
-    assert routes("""
+    assert (
+        routes("""
         PREFIX = "/x"
 
         @app.get(PREFIX)
@@ -123,7 +148,9 @@ def test_non_literal_paths_are_skipped():
 
         @app.get()
         def d(): ...
-        """) == []
+        """)
+        == []
+    )
 
 
 def test_class_methods_are_skipped_but_nested_functions_are_not():
@@ -169,10 +196,6 @@ def test_handler_ids_match_python_parser_nodes():
     found = parse_routes_source(src, PATH)
     assert len(found) == 3
     assert {r.handler_id for r in found} <= node_ids
-
-
-def fixture_files():
-    return sorted(FIXTURE.rglob("*.py"), key=lambda p: p.as_posix())
 
 
 def test_sample_fixture_routes():
@@ -225,3 +248,143 @@ def test_sample_fixture_has_no_dangling_internal_calls():
         "app/routers/users.py::create_user",
         "app/services/user_service.py::UserService.create",
     ) in calls
+
+
+# declarations
+def test_router_and_app_declarations():
+    assert decls("""
+        app = FastAPI(title="x")
+        router = APIRouter(prefix="/users", tags=["users"])
+        plain = APIRouter()
+        qualified = fastapi.APIRouter(prefix="/q")
+        typed: APIRouter = APIRouter(prefix="/t")
+        """) == [
+        ("app", "FastAPI", RouterKind.APP, ""),
+        ("router", "APIRouter", RouterKind.ROUTER, "/users"),
+        ("plain", "APIRouter", RouterKind.ROUTER, ""),
+        ("qualified", "fastapi.APIRouter", RouterKind.ROUTER, "/q"),
+        ("typed", "APIRouter", RouterKind.ROUTER, "/t"),
+    ]
+
+
+def test_non_literal_prefix_is_none():
+    assert [
+        d[3]
+        for d in decls("""
+        a = APIRouter(prefix=PREFIX)
+        b = APIRouter(prefix=f"/v{N}")
+        c = APIRouter(prefix="/ok")
+        """)
+    ] == [None, None, "/ok"]
+
+
+def test_app_never_has_a_prefix():
+    assert decls('app = FastAPI(prefix="/x")\n')[0][3] == ""
+
+
+def test_non_router_assignments_are_ignored():
+    assert (
+        decls("""
+        x = Foo()
+        cache = redis.Redis()
+        h = make_router()
+        a, b = APIRouter(), APIRouter()
+        d["k"] = APIRouter()
+        """)
+        == []
+    )
+
+
+def test_function_and_class_scope_are_skipped():
+    f = facts("""
+        def create_app():
+            app = FastAPI()
+            app.include_router(users.router)
+
+        class C:
+            r = APIRouter()
+            r.include_router(x)
+        """)
+    assert f.routers == [] and f.mounts == []
+
+
+def test_conditional_module_level_is_found():
+    assert [
+        d[0]
+        for d in decls("""
+        if DEBUG:
+            dbg = APIRouter(prefix="/debug")
+        """)
+    ] == ["dbg"]
+
+
+# mounts
+def test_mount_forms():
+    assert mounts("""
+        app.include_router(users.router)
+        app.include_router(orders.router, prefix="/api")
+        app.include_router(router=items_router, prefix=PREFIX)
+        api.v1.include_router(sub)
+        """) == [
+        ("app", "users.router", ""),
+        ("app", "orders.router", "/api"),
+        ("app", "items_router", None),
+        ("api.v1", "sub", ""),
+    ]
+
+
+def test_unresolvable_mounts_are_ignored():
+    assert (
+        mounts("""
+        app.include_router(make())
+        app.include_router()
+        include_router(x)
+        app.mount("/s", sub)
+        handlers[k].include_router(x)
+        """)
+        == []
+    )
+
+
+# bundle + robustness
+def test_syntax_error_yields_empty_facts():
+    f = facts("app = FastAPI()\ndef broken(:\n")
+    assert f.routes == [] and f.routers == [] and f.mounts == []
+
+
+def test_bundle_routes_match_parse_routes_source():
+    src = '@app.get("/a")\ndef a(): ...\n'
+    assert facts(src).routes == routes(src)
+
+
+def test_sample_fixture_declarations_and_mounts():
+    all_facts = [
+        parse_fastapi_file(p, p.relative_to(FIXTURE).as_posix())
+        for p in fixture_files()
+    ]
+    assert [
+        (d.file_path, d.var, d.kind, d.prefix) for f in all_facts for d in f.routers
+    ] == [
+        ("app/main.py", "app", RouterKind.APP, ""),
+        ("app/routers/orders.py", "router", RouterKind.ROUTER, "/orders"),
+        ("app/routers/users.py", "router", RouterKind.ROUTER, "/users"),
+    ]
+    assert [
+        (m.file_path, m.parent, m.child, m.prefix) for f in all_facts for m in f.mounts
+    ] == [
+        ("app/main.py", "app", "users.router", ""),
+        ("app/main.py", "app", "orders.router", "/api"),
+    ]
+
+
+def test_aliased_fastapi_constructors():
+    assert decls("""
+        from fastapi import APIRouter as R, FastAPI as F
+        from other import APIRouter as Q
+        r = R(prefix="/r")
+        f = F()
+        q = Q()
+        """) == [
+        ("r", "R", RouterKind.ROUTER, "/r"),
+        ("f", "F", RouterKind.APP, ""),
+    ]
