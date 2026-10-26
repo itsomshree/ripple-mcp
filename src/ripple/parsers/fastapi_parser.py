@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from ripple.graph.schema import (
+    DependRef,
     FastAPIFacts,
     MountRef,
     RouterDecl,
@@ -19,6 +21,8 @@ HTTP_METHODS = frozenset(
 )
 
 _CTORS = {"FastAPI": RouterKind.APP, "APIRouter": RouterKind.ROUTER}
+
+_DEP_CTORS = frozenset({"Depends", "Security"})
 
 
 def parse_routes_file(abs_path: Path, rel_path: str) -> list[RouteRef]:
@@ -35,6 +39,22 @@ def parse_routes_source(source: str, path: str) -> list[RouteRef]:
     collector = _RouteCollector(path)
     collector.visit(tree)
     return collector.routes
+
+
+def parse_depends_file(abs_path: Path, rel_path: str) -> list[DependRef]:
+    source = abs_path.read_bytes().decode("utf-8", errors="replace")
+    return parse_depends_source(source, rel_path)
+
+
+def parse_depends_source(source: str, path: str) -> list[DependRef]:
+    path = PurePosixPath(path.replace("\\", "/")).as_posix()
+    try:
+        tree = ast.parse(source, filename=path)
+    except (SyntaxError, ValueError, RecursionError):
+        return []
+    collector = _DependCollector(path, _dep_names(tree))
+    collector.visit(tree)
+    return collector.depends
 
 
 def _dotted_name(expr: ast.expr) -> str | None:
@@ -86,11 +106,14 @@ def parse_fastapi_source(source: str, path: str) -> FastAPIFacts:
     routes.visit(tree)
     decls = _DeclCollector(path)
     decls.visit(tree)
+    depends = _DependCollector(path, _dep_names(tree))
+    depends.visit(tree)
     return FastAPIFacts(
         path=path,
         routes=routes.routes,
         routers=decls.routers,
         mounts=decls.mounts,
+        depends=depends.depends,
     )
 
 
@@ -108,6 +131,71 @@ def _router_arg(call: ast.Call) -> ast.expr | None:
     if call.args:
         return call.args[0]
     return next((kw.value for kw in call.keywords if kw.arg == "router"), None)
+
+
+def _dep_names(tree: ast.Module) -> frozenset[str]:
+    names = set(_DEP_CTORS)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.level == 0
+            and (node.module or "").partition(".")[0] == "fastapi"
+        ):
+            names.update(
+                a.asname for a in node.names if a.name in _DEP_CTORS and a.asname
+            )
+    return frozenset(names)
+
+
+def _dependency_from_call(
+    expr: ast.expr, names: frozenset[str]
+) -> tuple[str, str] | None:
+    if not isinstance(expr, ast.Call):
+        return None
+    ctor = _dotted_name(expr.func)
+    if ctor is None or ctor.rpartition(".")[2] not in names:
+        return None
+    arg = (
+        expr.args[0]
+        if expr.args
+        else next((kw.value for kw in expr.keywords if kw.arg == "dependency"), None)
+    )
+    target = _dotted_name(arg) if arg is not None else None
+    return (ctor, target) if target is not None else None
+
+
+def _annotated_metadata(ann: ast.expr | None) -> list[ast.expr]:
+    if not isinstance(ann, ast.Subscript):
+        return []
+    head = _dotted_name(ann.value)
+    if head is None or head.rpartition(".")[2] != "Annotated":
+        return []
+    items = ann.slice.elts if isinstance(ann.slice, ast.Tuple) else []
+    return list(items[1:])
+
+
+def _signature_exprs(
+    node: ast.FunctionDef | ast.AsyncFunctionDef, in_class: bool
+) -> Iterator[ast.expr]:
+    args = node.args
+    yield from args.defaults
+    yield from (d for d in args.kw_defaults if d is not None)
+    every = [
+        *args.posonlyargs,
+        *args.args,
+        *args.kwonlyargs,
+        *(a for a in (args.vararg, args.kwarg) if a is not None),
+    ]
+    for a in every:
+        yield from _annotated_metadata(a.annotation)
+    if in_class:
+        return
+    for dec in node.decorator_list:
+        if not isinstance(dec, ast.Call) or _route_from_decorator(dec) is None:
+            continue
+        for kw in dec.keywords:
+            if kw.arg == "dependencies" and isinstance(kw.value, (ast.List, ast.Tuple)):
+                yield from kw.value.elts
 
 
 @dataclass(frozen=True)
@@ -154,6 +242,51 @@ class _RouteCollector(ast.NodeVisitor):
                         method=method,
                         path=route,
                         line=dec.lineno,
+                    )
+                )
+
+        self._scope.append(_Scope("function", qualname))
+        for stmt in node.body:
+            self.visit(stmt)
+        self._scope.pop()
+
+
+class _DependCollector(ast.NodeVisitor):
+    def __init__(self, path: str, names: frozenset[str]) -> None:
+        self.path = path
+        self.names = names
+        self.depends: list[DependRef] = []
+        self._scope: list[_Scope] = []
+
+    def _qualname(self, name: str) -> str:
+        return f"{self._scope[-1].qualname}.{name}" if self._scope else name
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self._scope.append(_Scope("class", self._qualname(node.name)))
+        for stmt in node.body:
+            self.visit(stmt)
+        self._scope.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self._visit_function(node)
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self._visit_function(node)
+
+    def _visit_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        qualname = self._qualname(node.name)
+        owner = symbol_id(self.path, qualname)
+        in_class = bool(self._scope) and self._scope[-1].kind == "class"
+
+        for expr in _signature_exprs(node, in_class):
+            found = _dependency_from_call(expr, self.names)
+            if found is not None:
+                self.depends.append(
+                    DependRef(
+                        owner_id=owner,
+                        ctor=found[0],
+                        target=found[1],
+                        line=expr.lineno,
                     )
                 )
 
