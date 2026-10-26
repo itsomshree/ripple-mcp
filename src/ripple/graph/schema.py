@@ -78,6 +78,8 @@ class APIEndpointNode(_Node):
     type: Literal[NodeType.API_ENDPOINT] = NodeType.API_ENDPOINT
     method: str
     route: str
+    exact: bool = True
+    mounted: bool = True
 
 
 class DBTableNode(_Node):
