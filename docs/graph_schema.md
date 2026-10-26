@@ -13,6 +13,7 @@ Defined in `src/ripple/graph/schema.py`. The graph is built in memory by
 | `APIEndpoint` | `endpoint::<METHOD> <route>` | Planned (step 3) |
 | `DBTable` | `table: <lowercase name>` | Planned (step 4) |
 | `Test` | `<path>::<qualname>` | Planned (step 5). Until then, test functions are plain `Function` nodes in files with `is_test` set |
+| `APIEndpoint` | `endpoint::<METHOD> <route>` | Full path after router prefixes, e.g. `endpoint::GET /api/orders/{order_id}`. An empty path becomes `/`. `exact` and `mounted` flags, see below |
 
 Line spans (`line_start`, `line_end`) start at the first decorator.
 
@@ -26,6 +27,7 @@ Line spans (`line_start`, `line_end`) start at the first decorator.
 | `HANDLES` | `APIEndpoint` → `Function` | Planned (step 3) |
 | `QUERIES` | `Function` → `DBTable` | Planned (step 4) |
 | `TESTS` | `Test` → `Function` / `APIEndpoint` | Planned (step 5) |
+| `HANDLES` | `APIEndpoint` → `Function` | Implemented |
 
 ### IMPORTS
 
@@ -56,8 +58,30 @@ Calls that can't be resolved are not edges. They are kept on
 | `ambiguous` | Module name matches more than one file |
 | `not_found` | Name or member isn't defined anywhere we can see |
 
+### HANDLES and APIEndpoint
+
+Routes are found by a separate AST walk (`parsers/fastapi_parser.py`) and
+resolved to full paths in `graph/routes.py`, then added by `GraphBuilder` as
+pass 4. Facts are passed with `GraphBuilder.add(parsed, facts)`; a file added
+without facts contributes no routes.
+
+- Receivers must resolve to a `FastAPI()` / `APIRouter()` declared in the repo.
+  Anything else gets no endpoint and is reported on `CodeGraph.route_issues`.
+- Prefixes are literal-only. Router prefixes and `include_router` prefixes are
+  composed outermost first.
+- The relation is many-to-many: a handler with stacked decorators, or a router
+  mounted twice, yields several endpoints. Two handlers with the same method
+  and path share one endpoint node with two `HANDLES` edges.
+- `exact` is false when any prefix on the path was non-literal or the mount
+  chain had a cycle, so `route` may be incomplete. `mounted` is false when the
+  router is never included in an app. When several routes collapse onto one
+  endpoint, both flags are ANDed.
+
+Diagnostics on `CodeGraph.route_issues`: `unknown_receiver`,
+`unresolved_mount`, `non_literal_prefix`, `mount_cycle`.
+
 ## Known gaps
 
 - `super().method()` is recorded only as a call to `super`.
-- Functions passed rather than called (e.g. `Depends(get_db)`) leave no edge yet (step 3).
+- Functions passed rather than called (e.g. `Depends(get_db)`) leave no edge yet (step 3, item 4).
 - Calls through local variables are `unknown_receiver`.
