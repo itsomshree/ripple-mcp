@@ -5,13 +5,18 @@ from dataclasses import dataclass, field
 
 from ripple.graph.calls import CallResolver
 from ripple.graph.resolver import DEFAULT_SOURCE_ROOTS, ModuleResolver
+from ripple.graph.routes import resolve_routes
 from ripple.graph.schema import (
+    APIEndpointNode,
     Edge,
     EdgeType,
+    FastAPIFacts,
     Node,
     ParsedFile,
+    RouteIssue,
     UnresolvedCall,
     UnresolvedReason,
+    endpoint_id,
     file_id,
 )
 
@@ -21,6 +26,7 @@ class CodeGraph:
     nodes: dict[str, Node] = field(default_factory=dict)
     edges: set[Edge] = field(default_factory=set)
     unresolved: list[UnresolvedCall] = field(default_factory=list)
+    route_issues: list[RouteIssue] = field(default_factory=list)
 
     def add_node(self, node: Node) -> None:
         self.nodes.setdefault(node.id, node)
@@ -42,12 +48,18 @@ class GraphBuilder:
     def __init__(self, source_roots: tuple[str, ...] = DEFAULT_SOURCE_ROOTS) -> None:
         self._source_roots = source_roots
         self._parsed: dict[str, ParsedFile] = {}
+        self._facts: dict[str, FastAPIFacts] = {}
 
-    def add(self, parsed: ParsedFile) -> None:
+    def add(self, parsed: ParsedFile, facts: FastAPIFacts | None = None) -> None:
         self._parsed[parsed.path] = parsed
+        if facts is None:
+            self._facts.pop(parsed.path, None)
+        else:
+            self._facts[parsed.path] = facts
 
     def remove(self, path: str) -> None:
         self._parsed.pop(path, None)
+        self._facts.pop(path, None)
 
     def build(self) -> CodeGraph:
         graph = CodeGraph()
@@ -87,4 +99,29 @@ class GraphBuilder:
                             reason=reason,
                         )
                     )
+
+        # pass 4: APIEndpoint nodes + HANDLES edges
+        resolution = resolve_routes(self._facts, modules)
+        graph.route_issues.extend(resolution.issues)
+        for r in resolution.routes:
+            if r.handler_id not in graph.nodes:
+                continue
+            route = r.path or "/"
+            eid = endpoint_id(r.method, route)
+            existing = graph.nodes.get(eid)
+            if isinstance(existing, APIEndpointNode):
+                existing.exact = existing.exact and r.exact
+                existing.mounted = existing.mounted and r.mounted
+            else:
+                graph.add_node(
+                    APIEndpointNode(
+                        id=eid,
+                        name=f"{r.method} {route}",
+                        method=r.method,
+                        route=route,
+                        exact=r.exact,
+                        mounted=r.mounted,
+                    )
+                )
+            graph.add_edge(Edge(type=EdgeType.HANDLES, src=eid, dst=r.handler_id))
         return graph
