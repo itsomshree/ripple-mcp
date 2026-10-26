@@ -22,6 +22,7 @@ class EdgeType(StrEnum):
     QUERIES = "QUERIES"
     TESTS = "TESTS"
     IMPORTS = "IMPORTS"
+    DEPENDS_ON = "DEPENDS_ON"
 
 
 def file_id(path: str) -> str:
@@ -172,11 +173,19 @@ class MountRef(BaseModel):
     line: int
 
 
+class DependRef(BaseModel):
+    owner_id: str
+    ctor: str
+    target: str
+    line: int
+
+
 class FastAPIFacts(BaseModel):
     path: str
     routes: list[RouteRef] = Field(default_factory=list)
     routers: list[RouterDecl] = Field(default_factory=list)
     mounts: list[MountRef] = Field(default_factory=list)
+    depends: list[DependRef] = Field(default_factory=list)
 
 
 class RouteIssueReason(StrEnum):
