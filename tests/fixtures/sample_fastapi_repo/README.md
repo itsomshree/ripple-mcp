@@ -16,6 +16,19 @@ Expected routes (declared path, before router prefixes):
 | GET | `/{order_id}` | `app/routers/orders.py::get_order` |
 | POST | `` | `app/routers/orders.py::place_order` |
 
+Full resolved paths (after router prefixes and mounts), asserted in
+`tests/unit/test_fastapi_routes.py` and `tests/unit/test_graph_endpoints.py`:
+
+| Method | Full path |
+|---|---|
+| GET | `/health` |
+| GET | `/users` |
+| GET | `/users/{user_id}` |
+| POST | `/users` |
+| DELETE | `/users/{user_id}` |
+| GET | `/api/orders/{order_id}` |
+| POST | `/api/orders` |
+
 Router prefixes: `users` router declares `prefix="/users"`; `orders` router
 declares `prefix="/orders"` and is mounted with `prefix="/api"`.
 
