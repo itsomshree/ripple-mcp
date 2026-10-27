@@ -448,3 +448,31 @@ def test_ambiguous_module_call():
     )
     assert calls_of(g) == set()
     assert unresolved(g) == {("m.py::f", "a.x.go"): R.AMBIGUOUS}
+
+
+def test_external_ref_forms():
+    r = resolver(
+        {
+            "pkg/__init__.py": "",
+            "pkg/mod.py": "def f(): pass\n",
+            "app.py": """
+            import fastapi
+            import fastapi.params as fp
+            import pkg.mod as pm
+            from fastapi import Depends as D
+            from fastapi.params import Security
+            from pkg.mod import f
+        """,
+        }
+    )
+    ref = r.external_ref
+    assert ref("app.py", "D") == ("fastapi", "Depends")
+    assert ref("app.py", "fastapi.Depends") == ("fastapi", "Depends")
+    assert ref("app.py", "fastapi.params.Depends") == ("fastapi.params", "Depends")
+    assert ref("app.py", "fp.Depends") == ("fastapi.params", "Depends")
+    assert ref("app.py", "Security") == ("fastapi.params", "Security")
+    assert ref("app.py", "f") is None
+    assert ref("app.py", "pm.f") is None
+    assert ref("app.py", "fastapi") is None
+    assert ref("app.py", "D.x") is None
+    assert ref("app.py", "unknown") is None
