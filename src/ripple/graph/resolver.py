@@ -181,7 +181,20 @@ class ModuleResolver:
             return Binding("module", sub, sub_file)
         if mod_file is not None:
             return Binding("symbol", module, mod_file, None, name)
-        return Binding("symbol", module, None, name, name)  # external
+        return Binding("symbol", module, None, name, name)
+
+    def external_ref(self, path: str, dotted: str) -> tuple[str, str] | None:
+        parts = dotted.split(".")
+        b = self.imports(path).bindings.get(parts[0])
+        if b is None or b.file is not None:
+            return None
+        if b.kind == "module":
+            if len(parts) < 2:
+                return None
+            return ".".join([b.module, *parts[1:-1]]), parts[-1]
+        if len(parts) != 1 or b.symbol is None:
+            return None
+        return b.module, b.symbol
 
     # internals
     def _resolve_imports(self, path: str) -> FileImports:
