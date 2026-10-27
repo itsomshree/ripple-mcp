@@ -63,18 +63,10 @@ class _Resolver:
         return RouteResolution(routes=routes, issues=self._issues)
 
     def _is_fastapi_ctor(self, path: str, d: RouterDecl) -> bool:
-        parts = d.ctor.split(".")
-        b = self._mods.imports(path).bindings.get(parts[0])
-        if b is None or b.file is not None:
+        ref = self._mods.external_ref(path, d.ctor)
+        if ref is None:
             return False
-        if b.kind == "module":
-            if len(parts) < 2:
-                return False
-            origin, name = ".".join([b.module, *parts[1:-1]]), parts[-1]
-        else:
-            if len(parts) != 1:
-                return False
-            origin, name = b.module, b.symbol
+        origin, name = ref
         return origin.partition(".")[0] == "fastapi" and name == _EXPECTED[d.kind]
 
     def _locate(self, path: str, expr: str) -> _Key | None:
