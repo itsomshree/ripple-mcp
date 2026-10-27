@@ -8,6 +8,7 @@ from ripple.graph.resolver import DEFAULT_SOURCE_ROOTS, ModuleResolver
 from ripple.graph.routes import resolve_routes
 from ripple.graph.schema import (
     APIEndpointNode,
+    CallRef,
     Edge,
     EdgeType,
     FastAPIFacts,
@@ -18,7 +19,15 @@ from ripple.graph.schema import (
     UnresolvedReason,
     endpoint_id,
     file_id,
+    symbol_id,
 )
+
+_DEP_CTORS = frozenset({"Depends", "Security"})
+
+
+def _enclosing_scope(path: str, owner_id: str) -> str:
+    parent = owner_id.partition("::")[2].rpartition(".")[0]
+    return symbol_id(path, parent) if parent else file_id(path)
 
 
 @dataclass
@@ -124,4 +133,42 @@ class GraphBuilder:
                     )
                 )
             graph.add_edge(Edge(type=EdgeType.HANDLES, src=eid, dst=r.handler_id))
+
+        # pass 5: DEPENDS_ON edges
+        for path in sorted(self._facts):
+            for dep in self._facts[path].depends:
+                ref = modules.external_ref(path, dep.ctor)
+                if (
+                    ref is None
+                    or ref[0].partition(".")[0] != "fastapi"
+                    or ref[1] not in _DEP_CTORS
+                    or dep.owner_id not in graph.nodes
+                ):
+                    continue
+                targets, reason = calls.resolve(
+                    path,
+                    CallRef(
+                        caller_id=_enclosing_scope(path, dep.owner_id),
+                        target=dep.target,
+                        line=dep.line,
+                    ),
+                )
+                for target in targets:
+                    graph.add_edge(
+                        Edge(
+                            type=EdgeType.DEPENDS_ON,
+                            src=dep.owner_id,
+                            dst=target,
+                        )
+                    )
+                if reason is not None:
+                    graph.unresolved.append(
+                        UnresolvedCall(
+                            caller_id=dep.owner_id,
+                            target=dep.target,
+                            line=dep.line,
+                            reason=reason,
+                            kind="depends",
+                        )
+                    )
         return graph
