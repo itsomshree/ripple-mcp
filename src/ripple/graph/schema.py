@@ -132,6 +132,7 @@ class UnresolvedCall(BaseModel):
     target: str
     line: int
     reason: UnresolvedReason
+    kind: Literal["call", "depends"] = "call"
 
 
 class ImportRef(BaseModel):
