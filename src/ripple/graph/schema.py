@@ -105,6 +105,23 @@ class Edge(BaseModel):
     dst: str
 
 
+class AccessMode(StrEnum):
+    READ = "read"
+    WRITE = "write"
+
+
+class TableAccess(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    table: str
+    access: AccessMode
+
+
+class SqlExtraction(BaseModel):
+    accesses: list[TableAccess] = Field(default_factory=list)
+    error: str | None = None
+
+
 class CallRef(BaseModel):
     caller_id: str
     target: str
@@ -187,6 +204,43 @@ class FastAPIFacts(BaseModel):
     routers: list[RouterDecl] = Field(default_factory=list)
     mounts: list[MountRef] = Field(default_factory=list)
     depends: list[DependRef] = Field(default_factory=list)
+
+
+class ModelDecl(BaseModel):
+    class_id: str
+    file_path: str
+    line: int
+    table: str | None = None
+    abstract: bool = False
+    non_literal: bool = False
+
+
+class DBFacts(BaseModel):
+    path: str
+    models: list[ModelDecl] = Field(default_factory=list)
+
+
+class DbIssueReason(StrEnum):
+    NON_LITERAL_TABLENAME = "non_literal_tablename"
+
+
+class DbIssue(BaseModel):
+    file_path: str
+    line: int
+    subject: str
+    reason: DbIssueReason
+
+
+class ResolvedModel(BaseModel):
+    class_id: str
+    file_path: str
+    table: str
+    own: bool
+
+
+class ModelResolution(BaseModel):
+    models: list[ResolvedModel] = Field(default_factory=list)
+    issues: list[DbIssue] = Field(default_factory=list)
 
 
 class RouteIssueReason(StrEnum):
