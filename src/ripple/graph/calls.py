@@ -59,6 +59,21 @@ class CallResolver:
         return self._targets(ent)
 
     # entry points
+    def base_classes(self, path: str, cls_qual: str) -> list[str]:
+        """Node ids of a class's in-repo base classes, in declaration order."""
+        cls = self._syms.get(path, {}).get(cls_qual)
+        if not isinstance(cls, ClassNode):
+            return []
+        out: list[str] = []
+        for raw in cls.bases:
+            base = self._resolve_base(path, raw)
+            if not isinstance(base, _Sym):
+                continue
+            node = self._syms[base.file][base.qual]
+            if isinstance(node, ClassNode):
+                out.append(node.id)
+        return out
+
     def _resolve_self(self, path: str, parts: list[str], caller_qual: str) -> _Entity:
         cls = self._enclosing_class(path, caller_qual)
         if cls is None or len(parts) != 2:
