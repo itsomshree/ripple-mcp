@@ -4,11 +4,15 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from ripple.graph.calls import CallResolver
+from ripple.graph.models import resolve_models
 from ripple.graph.resolver import DEFAULT_SOURCE_ROOTS, ModuleResolver
 from ripple.graph.routes import resolve_routes
 from ripple.graph.schema import (
     APIEndpointNode,
     CallRef,
+    DBFacts,
+    DbIssue,
+    DBTableNode,
     Edge,
     EdgeType,
     FastAPIFacts,
@@ -20,7 +24,9 @@ from ripple.graph.schema import (
     endpoint_id,
     file_id,
     symbol_id,
+    table_id,
 )
+from ripple.graph.usage import resolve_usage
 
 _DEP_CTORS = frozenset({"Depends", "Security"})
 
@@ -30,12 +36,19 @@ def _enclosing_scope(path: str, owner_id: str) -> str:
     return symbol_id(path, parent) if parent else file_id(path)
 
 
+def _table_node(graph: CodeGraph, name: str) -> str:
+    name = name.lower()
+    graph.add_node(DBTableNode(id=table_id(name), name=name))
+    return table_id(name)
+
+
 @dataclass
 class CodeGraph:
     nodes: dict[str, Node] = field(default_factory=dict)
     edges: set[Edge] = field(default_factory=set)
     unresolved: list[UnresolvedCall] = field(default_factory=list)
     route_issues: list[RouteIssue] = field(default_factory=list)
+    db_issues: list[DbIssue] = field(default_factory=list)
 
     def add_node(self, node: Node) -> None:
         self.nodes.setdefault(node.id, node)
@@ -46,7 +59,7 @@ class CodeGraph:
     def edges_of(self, type_: EdgeType) -> list[Edge]:
         return sorted(
             (e for e in self.edges if e.type == type_),
-            key=lambda e: (e.src, e.dst),
+            key=lambda e: (e.src, e.dst, e.access.value if e.access else ""),
         )
 
     def unresolved_by_reason(self) -> Counter[UnresolvedReason]:
@@ -58,17 +71,28 @@ class GraphBuilder:
         self._source_roots = source_roots
         self._parsed: dict[str, ParsedFile] = {}
         self._facts: dict[str, FastAPIFacts] = {}
+        self._db: dict[str, DBFacts] = {}
 
-    def add(self, parsed: ParsedFile, facts: FastAPIFacts | None = None) -> None:
+    def add(
+        self,
+        parsed: ParsedFile,
+        facts: FastAPIFacts | None = None,
+        db: DBFacts | None = None,
+    ) -> None:
         self._parsed[parsed.path] = parsed
         if facts is None:
             self._facts.pop(parsed.path, None)
         else:
             self._facts[parsed.path] = facts
+        if db is None:
+            self._db.pop(parsed.path, None)
+        else:
+            self._db[parsed.path] = db
 
     def remove(self, path: str) -> None:
         self._parsed.pop(path, None)
         self._facts.pop(path, None)
+        self._db.pop(path, None)
 
     def build(self) -> CodeGraph:
         graph = CodeGraph()
@@ -169,6 +193,35 @@ class GraphBuilder:
                             line=dep.line,
                             reason=reason,
                             kind="depends",
+                        )
+                    )
+
+        # pass 6: DBTable nodes + MAPS_TO / QUERIES edges
+        if self._db:
+            models = resolve_models(self._db, self._parsed, calls)
+            usage = resolve_usage(self._db, calls, models)
+
+            graph.db_issues.extend(models.issues)
+            for path in sorted(self._db):
+                graph.db_issues.extend(self._db[path].issues)
+
+            for m in models.models:
+                if m.class_id in graph.nodes:
+                    graph.add_edge(
+                        Edge(
+                            type=EdgeType.MAPS_TO,
+                            src=m.class_id,
+                            dst=_table_node(graph, m.table),
+                        )
+                    )
+            for use in usage.uses:
+                if use.owner_id in graph.nodes:
+                    graph.add_edge(
+                        Edge(
+                            type=EdgeType.QUERIES,
+                            src=use.owner_id,
+                            dst=_table_node(graph, use.table),
+                            access=use.access,
                         )
                     )
         return graph
