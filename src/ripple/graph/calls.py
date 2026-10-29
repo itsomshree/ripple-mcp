@@ -74,6 +74,23 @@ class CallResolver:
                 out.append(node.id)
         return out
 
+    def class_of(
+        self, path: str, dotted: str, scope_qual: str | None
+    ) -> tuple[str, int] | None:
+        parts = dotted.split(".")
+        ent = self._resolve_head(path, parts[0], scope_qual, dotted=len(parts) > 1)
+        consumed = 1
+        while True:
+            if isinstance(ent, _Fail):
+                return None
+            if isinstance(ent, _Sym):
+                node = self._syms[ent.file][ent.qual]
+                return (node.id, consumed) if isinstance(node, ClassNode) else None
+            if consumed >= len(parts):
+                return None
+            ent = self._step(ent, parts[consumed])
+            consumed += 1
+
     def _resolve_self(self, path: str, parts: list[str], caller_qual: str) -> _Entity:
         cls = self._enclosing_class(path, caller_qual)
         if cls is None or len(parts) != 2:
