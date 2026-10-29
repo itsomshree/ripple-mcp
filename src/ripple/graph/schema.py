@@ -23,6 +23,7 @@ class EdgeType(StrEnum):
     TESTS = "TESTS"
     IMPORTS = "IMPORTS"
     DEPENDS_ON = "DEPENDS_ON"
+    MAPS_TO = "MAPS_TO"
 
 
 def file_id(path: str) -> str:
@@ -103,6 +104,7 @@ class Edge(BaseModel):
     type: EdgeType
     src: str
     dst: str
+    access: AccessMode | None = None
 
 
 class AccessMode(StrEnum):
@@ -115,6 +117,26 @@ class TableAccess(BaseModel):
 
     table: str
     access: AccessMode
+
+
+class TableUse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    owner_id: str
+    table: str
+    access: AccessMode
+    line: int
+    source: Literal["sql", "orm"] = "sql"
+
+
+class ModelRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    owner_id: str
+    ref: str
+    access: AccessMode
+    line: int
+    called: bool = False
 
 
 class SqlExtraction(BaseModel):
@@ -215,13 +237,10 @@ class ModelDecl(BaseModel):
     non_literal: bool = False
 
 
-class DBFacts(BaseModel):
-    path: str
-    models: list[ModelDecl] = Field(default_factory=list)
-
-
 class DbIssueReason(StrEnum):
     NON_LITERAL_TABLENAME = "non_literal_tablename"
+    NON_LITERAL_SQL = "non_literal_sql"
+    UNPARSEABLE_SQL = "unparseable_sql"
 
 
 class DbIssue(BaseModel):
@@ -229,6 +248,14 @@ class DbIssue(BaseModel):
     line: int
     subject: str
     reason: DbIssueReason
+
+
+class DBFacts(BaseModel):
+    path: str
+    models: list[ModelDecl] = Field(default_factory=list)
+    uses: list[TableUse] = Field(default_factory=list)
+    refs: list[ModelRef] = Field(default_factory=list)
+    issues: list[DbIssue] = Field(default_factory=list)
 
 
 class ResolvedModel(BaseModel):
@@ -241,6 +268,10 @@ class ResolvedModel(BaseModel):
 class ModelResolution(BaseModel):
     models: list[ResolvedModel] = Field(default_factory=list)
     issues: list[DbIssue] = Field(default_factory=list)
+
+
+class UsageResolution(BaseModel):
+    uses: list[TableUse] = Field(default_factory=list)
 
 
 class RouteIssueReason(StrEnum):
