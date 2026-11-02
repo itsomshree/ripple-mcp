@@ -166,10 +166,14 @@ def test_base_classes_in_declaration_order_skipping_external():
     assert calls.base_classes("m.py", "nope") == []
 
 
-def test_sample_fixture_has_no_models_yet():
+def test_sample_fixture_models():
     files = sorted(FIXTURE.rglob("*.py"), key=lambda p: p.as_posix())
     rels = [p.relative_to(FIXTURE).as_posix() for p in files]
     parsed = {r: parse_python_file(p, r) for p, r in zip(files, rels)}
     facts = {r: parse_db_file(p, r) for p, r in zip(files, rels)}
     res = resolve_models(facts, parsed, CallResolver(parsed, ModuleResolver(parsed)))
-    assert res.models == [] and res.issues == []
+    assert full(res) == [
+        ("app/models.py::Order", "orders", True),
+        ("app/models.py::User", "users", True),
+    ]
+    assert res.issues == []
