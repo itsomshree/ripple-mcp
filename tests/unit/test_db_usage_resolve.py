@@ -183,11 +183,21 @@ def test_result_is_independent_of_file_order():
     assert resolve(files) == resolve(dict(reversed(files.items())))
 
 
-def test_sample_fixture_has_no_usage_yet():
+def test_sample_fixture_usage():
     files = sorted(FIXTURE.rglob("*.py"), key=lambda p: p.as_posix())
     rels = [p.relative_to(FIXTURE).as_posix() for p in files]
     parsed = {r: parse_python_file(p, r) for p, r in zip(files, rels)}
     facts = {r: parse_db_file(p, r) for p, r in zip(files, rels)}
     calls = CallResolver(parsed, ModuleResolver(parsed))
     res = resolve_usage(facts, calls, resolve_models(facts, parsed, calls))
-    assert res.uses == []
+    o = "app/services/order_service.py::OrderService"
+    u = "app/services/user_service.py::UserService"
+    assert got(res) == [
+        (f"{o}.get", "orders", "read", "sql"),
+        (f"{o}.place", "orders", "write", "sql"),
+        (f"{u}.create", "users", "write", "orm"),
+        (f"{u}.delete", "users", "read", "orm"),
+        (f"{u}.delete", "users", "write", "orm"),
+        (f"{u}.get", "users", "read", "orm"),
+        (f"{u}.list_all", "users", "read", "orm"),
+    ]
