@@ -89,7 +89,11 @@ class DBTableNode(_Node):
 
 
 class TestNode(SymbolNode):
+    __test__ = False
+
     type: Literal[NodeType.TEST] = NodeType.TEST
+    is_async: bool = False
+    class_name: str | None = None
 
 
 Node = Annotated[
@@ -105,11 +109,18 @@ class Edge(BaseModel):
     src: str
     dst: str
     access: AccessMode | None = None
+    via: Evidence | None = None
 
 
 class AccessMode(StrEnum):
     READ = "read"
     WRITE = "write"
+
+
+class Evidence(StrEnum):
+    CALL = "call"
+    HTTP = "http"
+    NAME = "name"
 
 
 class TableAccess(BaseModel):
@@ -137,6 +148,20 @@ class ModelRef(BaseModel):
     access: AccessMode
     line: int
     called: bool = False
+
+
+class HttpCallRef(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    owner_id: str
+    method: str
+    path: str
+    line: int
+
+
+class CoverageFacts(BaseModel):
+    path: str
+    http: list[HttpCallRef] = Field(default_factory=list)
 
 
 class SqlExtraction(BaseModel):
