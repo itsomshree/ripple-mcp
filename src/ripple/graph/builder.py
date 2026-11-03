@@ -4,21 +4,26 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from ripple.graph.calls import CallResolver
+from ripple.graph.coverage import CoverageLinks, EndpointIndex, direct_call_targets
 from ripple.graph.models import resolve_models
+from ripple.graph.pytest_discovery import find_tests
 from ripple.graph.resolver import DEFAULT_SOURCE_ROOTS, ModuleResolver
 from ripple.graph.routes import resolve_routes
 from ripple.graph.schema import (
     APIEndpointNode,
     CallRef,
+    CoverageFacts,
     DBFacts,
     DbIssue,
     DBTableNode,
     Edge,
     EdgeType,
+    Evidence,
     FastAPIFacts,
     Node,
     ParsedFile,
     RouteIssue,
+    TestNode,
     UnresolvedCall,
     UnresolvedReason,
     endpoint_id,
@@ -59,7 +64,12 @@ class CodeGraph:
     def edges_of(self, type_: EdgeType) -> list[Edge]:
         return sorted(
             (e for e in self.edges if e.type == type_),
-            key=lambda e: (e.src, e.dst, e.access.value if e.access else ""),
+            key=lambda e: (
+                e.src,
+                e.dst,
+                e.access.value if e.access else "",
+                e.via.value if e.via else "",
+            ),
         )
 
     def unresolved_by_reason(self) -> Counter[UnresolvedReason]:
@@ -72,12 +82,14 @@ class GraphBuilder:
         self._parsed: dict[str, ParsedFile] = {}
         self._facts: dict[str, FastAPIFacts] = {}
         self._db: dict[str, DBFacts] = {}
+        self._cov: dict[str, CoverageFacts] = {}
 
     def add(
         self,
         parsed: ParsedFile,
         facts: FastAPIFacts | None = None,
         db: DBFacts | None = None,
+        cov: CoverageFacts | None = None,
     ) -> None:
         self._parsed[parsed.path] = parsed
         if facts is None:
@@ -88,11 +100,16 @@ class GraphBuilder:
             self._db.pop(parsed.path, None)
         else:
             self._db[parsed.path] = db
+        if cov is None:
+            self._cov.pop(parsed.path, None)
+        else:
+            self._cov[parsed.path] = cov
 
     def remove(self, path: str) -> None:
         self._parsed.pop(path, None)
         self._facts.pop(path, None)
         self._db.pop(path, None)
+        self._cov.pop(path, None)
 
     def build(self) -> CodeGraph:
         graph = CodeGraph()
@@ -224,4 +241,40 @@ class GraphBuilder:
                             access=use.access,
                         )
                     )
+
+        # pass 7: promote test functions to Test nodes
+        for fn in find_tests(self._parsed):
+            graph.nodes[fn.id] = TestNode(
+                id=fn.id,
+                name=fn.name,
+                qualname=fn.qualname,
+                file_path=fn.file_path,
+                line_start=fn.line_start,
+                line_end=fn.line_end,
+                is_async=fn.is_async,
+                class_name=fn.class_name,
+            )
+
+        # pass 8: TESTS edges (strongest evidence per test/target pair)
+        links = CoverageLinks()
+        for test_id, target_id in direct_call_targets(
+            graph.nodes, graph.edges_of(EdgeType.CALLS)
+        ):
+            links.add(test_id, target_id, Evidence.CALL)
+
+        if self._cov:
+            index = EndpointIndex(
+                n for n in graph.nodes.values() if isinstance(n, APIEndpointNode)
+            )
+            for path in sorted(self._cov):
+                for call in self._cov[path].http:
+                    if not isinstance(graph.nodes.get(call.owner_id), TestNode):
+                        continue
+                    for eid in index.match(call.method, call.path):
+                        links.add(call.owner_id, eid, Evidence.HTTP)
+
+        for test_id, target_id, via in links.items():
+            graph.add_edge(
+                Edge(type=EdgeType.TESTS, src=test_id, dst=target_id, via=via)
+            )
         return graph
