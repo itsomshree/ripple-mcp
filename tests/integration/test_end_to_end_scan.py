@@ -4,9 +4,10 @@ from pathlib import Path
 import pytest
 
 from ripple.graph.builder import CodeGraph, GraphBuilder
-from ripple.graph.schema import EdgeType, NodeType, UnresolvedReason
+from ripple.graph.schema import EdgeType, Evidence, NodeType, UnresolvedReason
 from ripple.parsers.db_parser import parse_db_file
 from ripple.parsers.fastapi_parser import parse_fastapi_file
+from ripple.parsers.pytest_parser import parse_coverage_file
 from ripple.parsers.python_parser import parse_python_file
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample_fastapi_repo"
@@ -21,7 +22,10 @@ def builder() -> GraphBuilder:
     for p in sorted(FIXTURE.rglob("*.py"), key=lambda p: p.as_posix()):
         rel = p.relative_to(FIXTURE).as_posix()
         b.add(
-            parse_python_file(p, rel), parse_fastapi_file(p, rel), parse_db_file(p, rel)
+            parse_python_file(p, rel),
+            parse_fastapi_file(p, rel),
+            parse_db_file(p, rel),
+            parse_coverage_file(p, rel),
         )
     return b
 
@@ -61,22 +65,24 @@ def tables_reached(g: CodeGraph, start: str) -> set[tuple[str, str]]:
 
 def test_node_counts_by_type(graph):
     assert dict(Counter(n.type for n in graph.nodes.values())) == {
-        NodeType.FILE: 10,
+        NodeType.FILE: 13,
         NodeType.CLASS: 5,
-        NodeType.FUNCTION: 14,
+        NodeType.FUNCTION: 16,
         NodeType.API_ENDPOINT: 7,
         NodeType.DB_TABLE: 2,
+        NodeType.TEST: 5,
     }
 
 
 def test_edge_counts_by_type(graph):
     assert dict(Counter(e.type for e in graph.edges)) == {
-        EdgeType.DEFINED_IN: 19,
-        EdgeType.IMPORTS: 9,
-        EdgeType.CALLS: 14,
+        EdgeType.DEFINED_IN: 26,
+        EdgeType.IMPORTS: 14,
+        EdgeType.CALLS: 18,
         EdgeType.HANDLES: 7,
         EdgeType.MAPS_TO: 2,
         EdgeType.QUERIES: 7,
+        EdgeType.TESTS: 5,
     }
 
 
@@ -143,3 +149,26 @@ def test_rebuild_is_deterministic(builder, graph):
     assert set(again.nodes) == set(graph.nodes)
     assert again.db_issues == graph.db_issues
     assert again.route_issues == graph.route_issues
+
+
+def covers(g: CodeGraph):
+    return [(e.src, e.dst, e.via) for e in g.edges_of(EdgeType.TESTS)]
+
+
+def test_tests_edges(graph):
+    u, o = "tests/test_users.py", "tests/test_orders.py"
+    assert covers(graph) == [
+        (
+            f"{o}::test_place_order_endpoint",
+            "endpoint::POST /api/orders",
+            Evidence.HTTP,
+        ),
+        (f"{o}::test_place_order_service", f"{ORDERS}.place", Evidence.CALL),
+        (f"{u}::test_create_user_via_helper", f"{USERS}.create", Evidence.CALL),
+        (
+            f"{u}::test_get_user_endpoint",
+            "endpoint::GET /users/{user_id}",
+            Evidence.HTTP,
+        ),
+        (f"{u}::test_get_user_service", f"{USERS}.get", Evidence.CALL),
+    ]
