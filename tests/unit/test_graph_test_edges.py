@@ -108,7 +108,7 @@ def test_test_method_in_class_and_repeated_calls_collapse():
 
 
 # exclusions
-def test_only_direct_calls_from_tests_to_non_test_code_count():
+def test_only_calls_reachable_from_tests_through_helpers_count():
     g = build(
         {
             "app/__init__.py": "",
@@ -144,7 +144,12 @@ def test_only_direct_calls_from_tests_to_non_test_code_count():
                 """,
         }
     )
-    assert covers(g) == [("tests/test_x.py::test_direct", f"{SVC}::get", Evidence.CALL)]
+    t = "tests/test_x.py"
+    assert covers(g) == [
+        (f"{t}::test_direct", f"{SVC}::get", Evidence.CALL),
+        (f"{t}::test_nested", f"{SVC}::get", Evidence.CALL),
+        (f"{t}::test_via_helper", f"{SVC}::get", Evidence.CALL),
+    ]
     assert_no_dangling(g)
 
 
