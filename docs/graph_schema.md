@@ -173,7 +173,7 @@ one edge.
 **2. ORM references** (`ModelRef` facts, resolved in `graph/usage.py`).
 
 - A function uses a model if its body references the class by name. The whole
-  dotted chain is captured (`models.User.id`) and `CallCallResolver.class_of`
+  dotted chain is captured (`models.User.id`) and `CallResolver.class_of`
   finds the class it reaches, through imports, aliases and `__init__`
   re-exports. This covers `select(User)`, `session.query(User)`,
   `User.id == x`, `.join(Order)`: references that leave no `CALLS` edge.
