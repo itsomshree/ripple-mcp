@@ -15,6 +15,9 @@ not installed in the dev environment).
 | `app/services/order_service.py` | `OrderService`, raw SQL only; `place` calls `UserService.get` |
 | `app/models.py` | `Base`, `User` (`users`), `Order` (`orders`) |
 | `app/db.py` | `get_session()`, called by every service method |
+| `tests/conftest.py` | `client` fixture (never linked: fixtures are not propagated), `make_user` helper calling `UserService.create` |
+| `tests/test_users.py` | 3 tests: direct `UserService.get`, HTTP `GET /users/1`, `make_user` helper |
+| `tests/test_orders.py` | 2 tests: HTTP `POST /api/orders`, direct `OrderService.place` |
 
 ## Routes
 
@@ -67,18 +70,31 @@ the fixture covers both detection paths. `UserService.delete` has a read edge
 Asserted in `tests/unit/test_db_models.py`, `tests/unit/test_db_usage_resolve.py`
 and `tests/integration/test_end_to_end_scan.py`.
 
+## Tests and coverage
+
+| Test | Target | via |
+|---|---|---|
+| `test_get_user_service` | `UserService.get` | call |
+| `test_get_user_endpoint` | `GET /users/{user_id}` | http |
+| `test_create_user_via_helper` | `UserService.create` (through `make_user` in `conftest.py`) | call |
+| `test_place_order_service` | `OrderService.place` | call |
+| `test_place_order_endpoint` | `POST /api/orders` | http |
+
+The three paths are direct call, HTTP, and helper propagation. `client` is a
+fixture injected by name, so nothing links to it. Asserted in
+`tests/integration/test_end_to_end_scan.py`.
+
 ## Expected graph
 
 | Nodes | | Edges | |
 |---|---|---|---|
-| File | 10 | DEFINED_IN | 19 |
-| Class | 5 | IMPORTS | 9 |
-| Function | 14 | CALLS | 14 |
+| File | 13 | DEFINED_IN | 26 |
+| Class | 5 | IMPORTS | 14 |
+| Function | 16 | CALLS | 18 |
 | APIEndpoint | 7 | HANDLES | 7 |
 | DBTable | 2 | MAPS_TO | 2 |
-| | | QUERIES | 7 |
+| Test | 5 | QUERIES | 7 |
+| | | TESTS | 5 |
 
-The fixture has no `Depends(...)` use (no `DEPENDS_ON` edges), no tests (no
-`Test` nodes or `TESTS` edges), and produces no route or DB diagnostics. Step
-5 (test mapping) will add tests here, so these counts will change
-deliberately at that step.
+The fixture has no `Depends(...)` use (no `DEPENDS_ON` edges) and produces no
+route or DB diagnostics.
