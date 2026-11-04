@@ -12,7 +12,7 @@ Defined in `src/ripple/graph/schema.py`. The graph is built in memory by
 | `Class` | `<path>::<qualname>` | `bases` holds the raw base expressions |
 | `APIEndpoint` | `endpoint::<METHOD> <route>` | Full path after router prefixes, e.g. `endpoint::GET /api/orders/{order_id}`. An empty path becomes `/`. `exact` and `mounted` flags, see below |
 | `DBTable` | `table: <lowercase name>` | One per table that a model maps to or that SQL/ORM code touches. Schema prefixes are dropped (`public.users` is `table: users`) |
-| `Test` | `<path>::<qualname>` | Planned (step 5). Until then, test functions are plain `Function` nodes in files with `is_test` set |
+| `Test` | `<path>::<qualname>` | A pytest test function or method, promoted from `Function` in pass 7. Discovery follows pytest's rules: files named `test_*.py` or `*_test.py`; functions starting with `test`, at module level or in a `Test*` class without `__init__` or a `unittest.TestCase` subclass; `@pytest.fixture` functions are excluded; nested functions and nested classes are not detected |
 
 Line spans (`line_start`, `line_end`) start at the first decorator.
 
@@ -27,11 +27,12 @@ Line spans (`line_start`, `line_end`) start at the first decorator.
 | `DEPENDS_ON` | `Function` → `Function` / `Class` | Implemented |
 | `MAPS_TO` | `Class` → `DBTable` | Implemented |
 | `QUERIES` | `Function` / `File` → `DBTable` | Implemented. Carries `access` |
-| `TESTS` | `Test` → `Function` / `APIEndpoint` | Planned (step 5) |
+| `TESTS` | `Test` → `Function` / `Class` / `APIEndpoint` | Implemented. Carries `via` |
 
-Edges have an optional `access` attribute (`read` or `write`). Only `QUERIES`
-sets it. It is part of an edge's identity, so a function that both reads and
-writes a table has two `QUERIES` edges to it.
+Edges have two optional attributes. `access` (`read` or `write`) is set only by
+`QUERIES`. `via` (`call`, `http` or `name`) is set only by `TESTS`. Both are
+part of an edge's identity, so a function that both reads and writes a table
+has two `QUERIES` edges to it.
 
 ### IMPORTS
 
@@ -201,6 +202,37 @@ Diagnostics on `CodeGraph.db_issues`: `non_literal_tablename` (from model
 resolution, listed first), then per file in path order `non_literal_sql` and
 `unparseable_sql`.
 
+### TESTS
+
+`TESTS` links a test to the code it exercises. It is built by `GraphBuilder` as
+passes 7 (promote tests) and 8 (edges). A test can reach a target in two ways,
+and a test/target pair keeps only its strongest evidence (`call` over `http`
+over `name`).
+
+**1. Calls (`via=call`).** A `CALLS` edge from a test to a `Function` or
+`Class` outside the test files. Instantiating a class also links its
+`__init__`, as for `CALLS`.
+
+**2. HTTP (`via=http`).** A call in a function body of the form
+`client.get("/x")` (any receiver, any verb in the HTTP method set) or
+`client.request("GET", "/x")`, matched to `APIEndpoint` nodes by method and
+path. Paths may be literals or f-strings, where each hole becomes a wildcard.
+Query strings and fragments are stripped. Absolute URLs and paths built from
+variables are skipped. Matching is per segment: a literal beats a `{param}`;
+when a wildcard call ties between several routes, every tied endpoint is
+linked; `{p:path}` matches any remaining tail.
+
+**Helper propagation.** A helper is a `Function` in a test file that is not a
+test: `conftest.py` and `tests/` helper modules, plain helpers in test files,
+nested functions, `self._x()` methods on test classes, and `__init__` of
+helper classes. A test is credited with everything its helpers reach, however
+deep, so `test -> make() -> get()` yields `test -> get`, and an `http` fact
+inside a helper is credited to every test that reaches the helper. The walk
+stops at the first non-test symbol (coverage is not followed from source to
+source; impact analysis does that), never enters another test, ignores
+module-level calls in helper files, and tolerates cycles. Links reached through
+a helper keep `via=call` or `via=http`; the number of hops is not recorded.
+
 ## Known gaps
 
 - `super().method()` is recorded only as a call to `super`.
@@ -234,3 +266,12 @@ resolution, listed first), then per file in path order `non_literal_sql` and
   (`d.update(defaults)` marks `defaults`, which never resolves to a model).
 - A local variable or parameter named like a model class is not detected as
   shadowing it.
+  - Pytest fixtures are not propagated. A fixture is injected by parameter name,
+  not called, so source reached only through a fixture (`client` built from the
+  app) is not linked to the tests that use it. `Evidence.NAME` is reserved for
+  name-based links and is not produced yet.
+- Test coverage is over-approximate in one way: any helper call counts, even on
+  a branch that does not run. It is under-approximate in another: calls through
+  local variables are `unknown_receiver`, so `c = Client(); c.run()` links
+  `Client` but not `run`.
+- `via` does not distinguish a direct call from one reached through helpers.
