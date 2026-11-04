@@ -4,7 +4,13 @@ from collections import Counter
 from dataclasses import dataclass, field
 
 from ripple.graph.calls import CallResolver
-from ripple.graph.coverage import CoverageLinks, EndpointIndex, direct_call_targets
+from ripple.graph.coverage import (
+    CoverageLinks,
+    EndpointIndex,
+    covered_targets,
+    helper_owners,
+    reachable_helpers,
+)
 from ripple.graph.models import resolve_models
 from ripple.graph.pytest_discovery import find_tests
 from ripple.graph.resolver import DEFAULT_SOURCE_ROOTS, ModuleResolver
@@ -256,22 +262,26 @@ class GraphBuilder:
             )
 
         # pass 8: TESTS edges (strongest evidence per test/target pair)
+        call_edges = graph.edges_of(EdgeType.CALLS)
+        reach = reachable_helpers(graph.nodes, call_edges)
+
         links = CoverageLinks()
-        for test_id, target_id in direct_call_targets(
-            graph.nodes, graph.edges_of(EdgeType.CALLS)
-        ):
+        for test_id, target_id in covered_targets(graph.nodes, call_edges, reach):
             links.add(test_id, target_id, Evidence.CALL)
 
         if self._cov:
             index = EndpointIndex(
                 n for n in graph.nodes.values() if isinstance(n, APIEndpointNode)
             )
+            owners = helper_owners(reach)
             for path in sorted(self._cov):
                 for call in self._cov[path].http:
-                    if not isinstance(graph.nodes.get(call.owner_id), TestNode):
+                    tests = owners.get(call.owner_id)
+                    if not tests:
                         continue
                     for eid in index.match(call.method, call.path):
-                        links.add(call.owner_id, eid, Evidence.HTTP)
+                        for test_id in tests:
+                            links.add(test_id, eid, Evidence.HTTP)
 
         for test_id, target_id, via in links.items():
             graph.add_edge(
