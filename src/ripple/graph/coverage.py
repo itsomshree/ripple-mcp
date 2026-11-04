@@ -34,21 +34,71 @@ class CoverageLinks:
         return [(t, d, v) for (t, d), v in sorted(self._best.items())]
 
 
-def direct_call_targets(
+def _in_test_file(nodes: Mapping[str, Node], node: FunctionNode | ClassNode) -> bool:
+    home = nodes.get(node.file_path)
+    return isinstance(home, FileNode) and home.is_test
+
+
+def reachable_helpers(
     nodes: Mapping[str, Node], calls: Iterable[Edge]
-) -> list[tuple[str, str]]:
-    out: list[tuple[str, str]] = []
+) -> dict[str, frozenset[str]]:
+    helpers = {
+        nid
+        for nid, n in nodes.items()
+        if isinstance(n, FunctionNode) and _in_test_file(nodes, n)
+    }
+    adj: dict[str, list[str]] = defaultdict(list)
     for e in calls:
-        if not isinstance(nodes.get(e.src), TestNode):
+        if e.dst in helpers and (
+            e.src in helpers or isinstance(nodes.get(e.src), TestNode)
+        ):
+            adj[e.src].append(e.dst)
+
+    out: dict[str, frozenset[str]] = {}
+    for tid, n in nodes.items():
+        if not isinstance(n, TestNode):
             continue
-        target = nodes.get(e.dst)
-        if not isinstance(target, (FunctionNode, ClassNode)):
-            continue
-        home = nodes.get(target.file_path)
-        if isinstance(home, FileNode) and home.is_test:
-            continue
-        out.append((e.src, e.dst))
+        seen = {tid}
+        stack = [tid]
+        while stack:
+            for nxt in adj.get(stack.pop(), ()):
+                if nxt not in seen:
+                    seen.add(nxt)
+                    stack.append(nxt)
+        out[tid] = frozenset(seen)
     return out
+
+
+def helper_owners(
+    reach: Mapping[str, frozenset[str]],
+) -> dict[str, tuple[str, ...]]:
+    out: dict[str, list[str]] = defaultdict(list)
+    for test_id in sorted(reach):
+        for owner in reach[test_id]:
+            out[owner].append(test_id)
+    return {owner: tuple(tests) for owner, tests in out.items()}
+
+
+def covered_targets(
+    nodes: Mapping[str, Node],
+    calls: Iterable[Edge],
+    reach: Mapping[str, frozenset[str]],
+) -> list[tuple[str, str]]:
+    by_src: dict[str, list[str]] = defaultdict(list)
+    for e in calls:
+        by_src[e.src].append(e.dst)
+
+    out: set[tuple[str, str]] = set()
+    for test_id, owners in reach.items():
+        for owner in owners:
+            for dst in by_src.get(owner, ()):
+                target = nodes.get(dst)
+                if not isinstance(target, (FunctionNode, ClassNode)):
+                    continue
+                if _in_test_file(nodes, target):
+                    continue
+                out.add((test_id, dst))
+    return sorted(out)
 
 
 _WILD = re.compile(r"\{[^{}]*\}")
