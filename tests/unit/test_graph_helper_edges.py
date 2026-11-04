@@ -56,7 +56,7 @@ def get_user(user_id): ...
 @app.get("/health")
 def health(): ...
 
-app.inclide_router(router)
+app.include_router(router)
 """
 
 
