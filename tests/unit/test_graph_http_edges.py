@@ -157,7 +157,7 @@ def test_test_class_methods_are_sources():
     assert covers(g) == [(f"{T}::TestApi.test_health", HEALTH, Evidence.HTTP)]
 
 
-def test_only_test_functions_are_sources():
+def test_only_tests_and_the_helpers_they_reach_are_sources():
     g = build(
         {
             APP: MAIN,
@@ -182,7 +182,10 @@ def test_only_test_functions_are_sources():
                 """,
         }
     )
-    assert covers(g) == [(f"{T}::test_ok", GET_USER, Evidence.HTTP)]
+    assert covers(g) == [
+        (f"{T}::test_nested", HEALTH, Evidence.HTTP),
+        (f"{T}::test_ok", GET_USER, Evidence.HTTP),
+    ]
     assert_no_dangling(g)
 
 
