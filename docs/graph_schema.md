@@ -233,6 +233,30 @@ source; impact analysis does that), never enters another test, ignores
 module-level calls in helper files, and tolerates cycles. Links reached through
 a helper keep `via=call` or `via=http`; the number of hops is not recorded.
 
+## Persistence (Neo4j)
+
+`GraphStore` (`src/ripple/graph/store.py`) writes a `CodeGraph` to Neo4j.
+Connection settings come from `ripple.config` (`NEO4J_URI`, `NEO4J_USER`,
+`NEO4J_PASSWORD`).
+
+- Node labels are the `NodeType` values and relationship types are the
+  `EdgeType` values. Each label has a uniqueness constraint on `id`
+  (`ensure_schema`, idempotent).
+- Node properties come from `to_properties()`: `None` values are dropped,
+  `type` becomes the label, and list fields (`decorators`, `bases`) are stored
+  as string lists.
+- Relationships are MERGEd on (source, destination, type, `access`, `via`).
+  Neo4j cannot MERGE on null, so an absent `access` or `via` is stored as `""`;
+  readers must map `""` back to `None`.
+- Edges are written in groups by (type, source label, destination label) so
+  each `MATCH` uses the per-label `id` index.
+- `write_graph` is idempotent. `replace_graph` is a full replace
+  (`ensure_schema`, `clear`, `write_graph`); it is what a full scan uses.
+
+Known limits: `clear` wipes the whole database, there is no per-file patching
+yet (planned for incremental rescans), and queries run in auto-commit sessions
+without retries.
+
 ## Known gaps
 
 - `super().method()` is recorded only as a call to `super`.
