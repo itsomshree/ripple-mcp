@@ -257,6 +257,79 @@ Known limits: `clear` wipes the whole database, there is no per-file patching
 yet (planned for incremental rescans), and queries run in auto-commit sessions
 without retries.
 
+## Impact analysis
+
+`analysis/impact.py` answers "what is affected if I change X". `impact(view,
+starts, max_hops=5, max_results=500, include_importers=False)` takes resolved
+nodes; turning strings like `POST /users` into nodes is the job of the MCP
+tools. It reads the graph through a two-method `GraphView` protocol, with an
+in-memory implementation (`CodeGraphView`) and a Neo4j one
+(`analysis/neo4j_view.py`, one `GraphQuery.neighbors` call per hop plus a node
+cache).
+
+### What a change to each kind of node means
+
+| Start | Seeds (affected at hop 1 unless noted) |
+|---|---|
+| `Function` / `Test` | none; the spread below starts from the node itself |
+| `Class` | its methods, its `MAPS_TO` table, and at hop 2 every function or class that queries or maps to that table (ORM users leave no `CALLS` edge) |
+| `DBTable` | functions and files that `QUERIES` it, classes that `MAPS_TO` it |
+| `APIEndpoint` | none; tests that hit it come from the spread. Its handler is returned as `context`, not as affected |
+| `File` | every symbol defined in it, and files that import it, transitively, one hop per `IMPORTS` level (this covers `__init__.py` re-exports) |
+
+Importer files are added for function and class starts only with
+`include_importers=True`: importing a file does not mean using the changed
+symbol, so by default that fringe stays out.
+
+### How it spreads
+
+From the start nodes and seeds, the traversal follows reverse `CALLS`,
+`DEPENDS_ON`, `HANDLES` and `TESTS`. A changed function reaches its callers,
+the endpoints they handle, and the tests that hit or call any of them. It is a
+level-by-level BFS: each node is reported once, at its shortest distance, so
+cycles and diamonds are safe. Seeds join at their own hop, and a seed's edge
+wins a tie with a spread edge at the same hop.
+
+### Affected tables
+
+Only tables the changed code itself touches: forward `QUERIES` and `MAPS_TO`
+from the start nodes and from symbols they expand to (a class's methods, a
+file's symbols). Callers' tables are not added, otherwise every change would
+appear to touch the busiest table. A `DBTable` start is not listed as its own
+impact.
+
+### Result
+
+`ImpactResult` carries `starts`, `context`, and `entries`: one `ImpactEntry`
+per affected node with its `group`, `hops`, `parent` and the `via` edge that
+reached it. `functions`, `classes`, `endpoints`, `tables`, `tests` and `files`
+are views over `entries`, and `path_to(id)` rebuilds the steps from a start to
+any entry so tools can explain why something is affected. Functions and
+classes defined in test files (`make_user` in `conftest.py`) are grouped with
+`tests`. The class-to-method step in `path_to` uses a synthesized
+`DEFINED_IN(method -> class)` edge, because the graph stores no such edge.
+
+Two flags say when the answer is partial:
+
+- `truncated`: the result cap was hit. Farthest hops are cut first.
+- `depth_limited`: more nodes are reachable beyond `max_hops`.
+
+### Blind spots
+
+Impact is only as good as the edges. These changes are missed:
+
+- Inheritance. There is no edge for `class A(Base)`, so changing `Base` does
+  not reach subclasses or their callers. An `INHERITS` edge is the natural
+  addition.
+- Type-annotation references (`def f(u: User)`).
+- Functions passed as callbacks, apart from FastAPI `Depends`.
+- Tests that reach code only through pytest fixtures.
+- Router-level and app-level `dependencies=[...]`.
+- Calls through local variables (`unknown_receiver`).
+
+Class-level table expansion over-approximates on purpose: raw-SQL users of the
+same table and other models on it are included.
+
 ## Known gaps
 
 - `super().method()` is recorded only as a call to `super`.
@@ -299,3 +372,6 @@ without retries.
   local variables are `unknown_receiver`, so `c = Client(); c.run()` links
   `Client` but not `run`.
 - `via` does not distinguish a direct call from one reached through helpers.
+- Impact analysis follows only edges the graph has; see "Blind spots" under
+  "Impact analysis" (inheritance, annotation references and callbacks are the
+  main misses).
