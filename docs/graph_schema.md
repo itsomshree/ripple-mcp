@@ -330,6 +330,72 @@ Impact is only as good as the edges. These changes are missed:
 Class-level table expansion over-approximates on purpose: raw-SQL users of the
 same table and other models on it are included.
 
+## Risk scoring
+
+`analysis/risk.py` turns an `ImpactResult` into a score and a level:
+`assess_risk(view, result, config=DEFAULT_CONFIG) -> RiskAssessment`. It reads
+the graph only through `GraphView` (one `TESTS` lookup), so it behaves the
+same on the in-memory and Neo4j views.
+
+### Factors
+
+| Factor | Raw value | Saturates at | Weight |
+|---|---|---|---|
+| `endpoints` | affected endpoints, plus an endpoint start | 8 | 0.35 |
+| `tables` | affected tables, plus a table start | 4 | 0.25 |
+| `coverage_gap` | uncovered fraction of the start nodes and affected endpoints | linear | 0.25 |
+| `fan_in` | dependents attached directly to the changed surface | 10 | 0.15 |
+
+Counts go through a saturating curve, `min(1, ln(1 + n) / ln(1 + cap))`, so
+the first endpoint matters more than the tenth. The score is the weighted sum
+× 100, rounded to one decimal; the level comes from the rounded score:
+below 25 is `low`, below 50 `medium`, below 75 `high`, otherwise `critical`.
+Weights, caps and thresholds live in the frozen `RiskConfig`, which validates
+itself (weights sum to 1, thresholds ascend).
+
+Start nodes count as affected for endpoints and tables: `ImpactResult` leaves
+them out of its own groups, but changing `POST /users` or a table is itself
+the change.
+
+**Coverage.** "Considered" is the non-test `Function` / `Class` / `APIEndpoint`
+start nodes plus the affected endpoints. "Covered" means an incoming `TESTS`
+edge (`call` or `http`). Tests link to the first source symbol and to
+endpoints, so affected callers in between are not judged. If nothing is
+considered (a file, table or test start with no affected endpoints), the
+factor is `n/a` and contributes 0.
+
+**Fan-in.** The changed surface is the start nodes, the symbols a start expands
+to (`DEFINED_IN` entries for a file or class) and affected tables. Fan-in counts
+function and class entries reached through `CALLS`, `DEPENDS_ON`, `QUERIES` or
+`MAPS_TO` whose parent is in that surface. For a function start this is its
+direct callers; for a file start, the callers of its symbols.
+
+### Caveats
+
+Incomplete data never changes the score silently. It appears in
+`RiskAssessment.caveats` instead:
+
+- `truncated` or `depth_limited`: the counts are lower bounds.
+- Affected endpoints with `exact=False` (possibly incomplete route) or
+  `mounted=False` (never included in an app).
+- No dependents found: not proof of safety, since inheritance, callbacks,
+  fixtures and annotation references are not tracked.
+- Dependents found but no test reaches the changed code.
+
+### Limits
+
+- Table access is not weighted: `ImpactEntry` keeps one `via` per table, so a
+  change that writes a table scores like one that only reads it. Weighting
+  writes needs an extra `QUERIES` lookup.
+- A fully uncovered start contributes the whole coverage weight (25 points),
+  which is exactly the `medium` threshold, so any untested change is at least
+  `medium`, even a leaf nothing calls.
+- Endpoints count equally whatever the method (`GET` vs `DELETE`).
+- Coverage is only as good as the `TESTS` edges. Fixture-only coverage is not
+  linked, so it reads as uncovered, which errs towards higher risk.
+- Weights and caps are untuned heuristics; adjust them through `RiskConfig`.
+
+
 ## Known gaps
 
 - `super().method()` is recorded only as a call to `super`.
