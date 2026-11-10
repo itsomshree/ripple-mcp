@@ -85,7 +85,7 @@ def _neighbor_key(n: Neighbor) -> tuple[str, ...]:
     )
 
 
-def _match_tier(node: Node, name: str) -> int:
+def match_tier(node: Node, name: str) -> int:
     if node.id == name:
         return 0
     if getattr(node, "qualname", None) == name:
@@ -131,7 +131,7 @@ class GraphQuery:
             return []
         rows = self._store.execute(query, {"q": name})
         found = [node_from_row(r["label"], r["props"]) for r in rows]
-        found.sort(key=lambda n: (_match_tier(n, name), n.id))
+        found.sort(key=lambda n: (match_tier(n, name), n.id))
         return found[:limit]
 
     # traversal
