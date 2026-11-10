@@ -330,6 +330,62 @@ Impact is only as good as the edges. These changes are missed:
 Class-level table expansion over-approximates on purpose: raw-SQL users of the
 same table and other models on it are included.
 
+## Entity resolution
+
+`analysis/entity.py` turns a user-supplied string into one node:
+`resolve_entity(finder, query, types=None, limit=10)` returns a `Resolution`
+with status `ok`, `ambiguous` or `not_found`. The finder is anything with
+`GraphQuery.find_nodes`'s shape: `GraphQuery` itself, or `GraphFinder` over an
+in-memory `CodeGraph` (same matching and ranking, kept in step by an
+integration parity test).
+
+- Matches are ranked by tier: exact id, then qualname, then name, then path
+  (a full path, or a suffix on a `/` boundary).
+- It never guesses. If several nodes tie at the best tier the result is
+  `ambiguous` and lists them (`get` matches both `UserService.get` and
+  `OrderService.get`).
+- `not_found` carries close suggestions, found by searching again on the last
+  path or dotted segment that matches something.
+- Endpoint-looking input is canonicalised (`post  /x` becomes `POST /x`) and a
+  trailing slash falls back to the route without one. Backslashes in paths
+  are normalised.
+- An empty graph is not detected here. The tool layer checks for it.
+
+## Request flow
+
+`analysis/request_flow.py` answers "what does this request reach".
+`trace_flow(view, start, max_hops=6, max_results=200)` goes forward from an
+endpoint or a function and reports every function and class it can reach,
+plus the tables they touch. It reads the graph through the same `GraphView`
+protocol as impact analysis, so it behaves the same on the in-memory and Neo4j
+views.
+
+**Starts.** An endpoint expands through `HANDLES`: its handlers are hop 1
+(unlike impact analysis, where they are only context), and a shared endpoint
+can have several. A non-test function is hop 0 and its callees are hop 1.
+Classes, tables, files, tests and test helpers raise `UnsupportedStart`.
+
+**Spread.** Level-by-level BFS along `CALLS`, `DEPENDS_ON` and `HANDLES`.
+Each node is reported once at its shortest distance, with its `parent` and
+`via` edge, so cycles and diamonds are safe and `path_to(id)` can explain why
+a node is in the flow.
+
+**Reachability, not execution order.** Hops are distance from the start, not
+a call stack. FastAPI runs dependencies before the handler, but both can sit
+at the same hop.
+
+**Tables.** `QUERIES` edges are collected from every reached node (and from a
+function start) but not followed. The result has the tables each step touches
+(`FlowStep.tables`, `FlowResult.start_tables`) and one `TableTouch` per table
+with merged `read` / `write` access, the distance of the closest toucher, and
+the touching nodes, closest first.
+
+**Result.** `FlowResult` carries `start`, `steps`, `tables`, `truncated`,
+`depth_limited` and `caveats`. Caveats appear only when relevant: the result
+is truncated or depth-limited, the start endpoint is inexact or unmounted, or
+no table access was found (ORM relationship traversal, SQL built from imported
+constants and calls through local variables are not detected).
+
 ## Risk scoring
 
 `analysis/risk.py` turns an `ImpactResult` into a score and a level:
@@ -441,3 +497,6 @@ Incomplete data never changes the score silently. It appears in
 - Impact analysis follows only edges the graph has; see "Blind spots" under
   "Impact analysis" (inheritance, annotation references and callbacks are the
   main misses).
+  - Entity resolution matches an endpoint only by its declared route
+  (`GET /users/{user_id}`). A concrete path such as `GET /users/42` does not
+  resolve; it would need `EndpointIndex` and all endpoints loaded.
