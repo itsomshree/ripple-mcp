@@ -386,6 +386,36 @@ is truncated or depth-limited, the start endpoint is inexact or unmounted, or
 no table access was found (ORM relationship traversal, SQL built from imported
 constants and calls through local variables are not detected).
 
+## Affected tests
+
+`analysis/affected_tests.py` answers "which tests should I run if I change X".
+It adds no traversal of its own: `find_affected_tests(view, starts,
+max_hops=8, max_results=500, include_importers=False)` runs `impact()` and
+picks the tests out of the result with `affected_from_impact(result)`, which a
+tool can also call on an impact result it already has. The default depth is 8
+rather than impact's 5, because tests sit at the fringe of the graph (on the
+sample repo a change to the `User` model reaches its farthest test at hop 6).
+
+- `tests` are the runnable tests (`Test` nodes), nearest first. Each has
+  `pytest_id` (`file::Class::method` or `file::function`, relative to the
+  scanned repo root, so run pytest from there), `hops`, `evidence` and `path`
+  (node ids from the start to the test).
+- `hops` is distance from the changed code. For a function or endpoint start,
+  hop 1 means the test covers it directly.
+- `evidence` is `call` or `http`. A test that calls the code is admitted
+  through its `CALLS` edge, which sorts before its `TESTS` edge, so it reads as
+  `call`; otherwise the value comes from the `TESTS` edge's `via`.
+- `helpers` are functions and classes in test files that sit on the path
+  (`conftest.make_user`). They are not runnable and are listed apart from
+  `tests`.
+- `files` are the distinct test files, nearest first, for callers that prefer
+  `pytest <files>` to a long list of ids.
+- A start that is itself a test raises `UnsupportedStart`.
+
+Caveats appear only when relevant: the result is truncated or depth-limited
+(the list is a lower bound), or no tests were found (tests that reach the code
+only through pytest fixtures are not linked).
+
 ## Risk scoring
 
 `analysis/risk.py` turns an `ImpactResult` into a score and a level:
