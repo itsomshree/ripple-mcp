@@ -416,6 +416,50 @@ Caveats appear only when relevant: the result is truncated or depth-limited
 (the list is a lower bound), or no tests were found (tests that reach the code
 only through pytest fixtures are not linked).
 
+## Scanning
+
+`scanner/repo_scanner.py` turns a repository directory into a graph.
+`build_graph(repo_path, exclude=(), source_roots=DEFAULT_SOURCE_ROOTS,
+max_file_bytes=1_000_000)` walks, parses and builds in memory and returns a
+`ScanResult(graph, summary)`; it never touches Neo4j. `scan_repo(repo_path,
+store, ...)` builds, then calls `store.replace_graph(graph)`. The store is any
+object with a `replace_graph` method, so tests pass a fake.
+
+**Discovery.** A sorted `os.walk` over `*.py` files. These directories are
+pruned: `.git`, `.hg`, `.svn`, `.venv`, `venv`, `node_modules`, `__pycache__`,
+`site-packages`, `.tox`, `.nox`, `.eggs`, the mypy/pytest/ruff caches, anything
+ending in `.egg-info`, and any directory containing a `pyvenv.cfg` (so a
+virtualenv is skipped whatever it is called, while a real package named `env`
+is kept). Symlinked files and directories are not followed. Files over
+`max_file_bytes` are skipped and counted. `exclude` takes globs matched with
+`fnmatch` against the repo-relative POSIX path, where `*` also matches `/`, so
+`tests/fixtures/*` covers nested files. `.gitignore` is not read.
+
+**Parsing.** `parse_file(root, rel)` reads a file once, decodes it with
+`errors="replace"`, hashes the raw bytes, and runs the four `*_source`
+parsers (Python, FastAPI, DB, coverage). It is the unit an incremental rescan
+will call for changed files. A file with a syntax error still gets its `File`
+node and is reported in the summary; an unreadable file is counted and skipped.
+
+**Safety.** `replace_graph` wipes before it writes, so everything that can
+fail is checked first: a path that is not a directory, or a repo with no
+readable Python files, raises `ScanError` before the store is touched.
+
+**Summary.** `ScanSummary` carries file counts (scanned, excluded, too large,
+unreadable), the parse-error count with the first 20 errors, node and edge
+counts by type, `route_issues` / `db_issues` / `unresolved` counts by reason,
+and the duration. Issues and unresolved calls are not stored in Neo4j, so this
+summary is where they are visible. `summary.format()` renders it as text.
+
+**CLI.** `scripts/scan_repo.py --repo-path PATH [--exclude GLOB ...]
+[--dry-run]`. `--repo-path` defaults to `REPO_PATH`; `--dry-run` builds and
+prints the summary without needing Neo4j.
+
+Known limits: the write is wipe-then-write and not atomic, so a Neo4j failure
+mid-write leaves a partial or empty graph until the next scan, and a query that
+runs during a scan sees a partial graph. Each file is parsed four times (one
+`ast.parse` per parser); sharing one tree would need a parser API change.
+
 ## Risk scoring
 
 `analysis/risk.py` turns an `ImpactResult` into a score and a level:
@@ -530,3 +574,15 @@ Incomplete data never changes the score silently. It appears in
   - Entity resolution matches an endpoint only by its declared route
   (`GET /users/{user_id}`). A concrete path such as `GET /users/42` does not
   resolve; it would need `EndpointIndex` and all endpoints loaded.
+  - Function parameters and local variables do not shadow module-level names.
+  A parameter named like a module-level function (typically a pytest fixture:
+  `def q(...)` used as `def test_x(q): q.find_nodes()`) resolves to that
+  function, so the call is reported as `not_found` instead of
+  `unknown_receiver`, and a bare call through such a parameter would link to
+  the wrong function.
+- Receiver types are not inferred. Method calls through a local, a parameter
+  annotated with a repo class, or `self.<attr>` (`builder.add(...)`,
+  `view.edges(...)`, `self._store.execute(...)`) are `unknown_receiver`. On
+  this project's own source about 60% of the most frequent unresolved targets
+  are repo-class calls of this kind; the rest are builtin and standard-library
+  methods, which cannot resolve to repo code anyway.
