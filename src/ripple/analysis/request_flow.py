@@ -86,9 +86,10 @@ def trace_flow(
     max_results: int = DEFAULT_MAX_RESULTS,
 ) -> FlowResult:
     if not can_trace(view, start):
+        kind = "test helper" if isinstance(start, FunctionNode) else start.type.value
         raise UnsupportedStart(
-            f"{start.id} is a {start.type.value}; a request flow starts from "
-            "an endpoint or a function"
+            f"{start.id} is a {kind}; a request flow starts from an endpoint "
+            "or an application function"
         )
     steps, truncated, depth_limited = _walk(view, start, max_hops, max_results)
     result = FlowResult(
