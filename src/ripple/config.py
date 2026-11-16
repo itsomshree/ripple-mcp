@@ -21,9 +21,14 @@ class Settings(BaseSettings):
 
     mcp_auth_token: SecretStr | None = None
     repo_path: Path | None = None
+    scan_exclude: str = ""
     log_level: str = "INFO"
+
+    @property
+    def exclude_globs(self) -> tuple[str, ...]:
+        return tuple(p.strip() for p in self.scan_exclude.split(",") if p.strip())
 
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # pyright: ignore[reportCallIssue]
