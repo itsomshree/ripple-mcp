@@ -54,3 +54,10 @@ def test_env_overrides(monkeypatch):
 def test_password_is_not_leaked_in_repr(monkeypatch):
     monkeypatch.setenv("NEO4J_PASSWORD", "pw-12345")
     assert "pw-12345" not in repr(make())
+
+
+def test_scan_exclude_is_split_into_globs(monkeypatch):
+    monkeypatch.setenv("NEO4J_PASSWORD", "pw-12345")
+    assert make().exclude_globs == ()
+    monkeypatch.setenv("SCAN_EXCLUDE", "tests/fixtures/*, migrations/* ,")
+    assert make().exclude_globs == ("tests/fixtures/*", "migrations/*")
