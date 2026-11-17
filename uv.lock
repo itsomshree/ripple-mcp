@@ -1229,7 +1229,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastmcp", specifier = ">=0.1.0" },
+    { name = "fastmcp", specifier = ">=4.0.10" },
     { name = "gitpython", specifier = ">=3.1.0" },
     { name = "neo4j", specifier = ">=5.20.0" },
     { name = "pydantic", specifier = ">=2.0.0" },

@@ -5,7 +5,7 @@ description = "RippleMCP — change impact analysis for Python/FastAPI/PostgreSQ
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "fastmcp>=0.1.0",
+    "fastmcp>=4.0.10",
     "tree-sitter>=0.21.0",
     "tree-sitter-python>=0.21.0",
     "sqlglot>=24.0.0",
@@ -33,6 +33,7 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/integration"]
 norecursedirs = ["fixtures"]
+asyncio_mode = "auto"
 
 [tool.ruff]
 extend-exclude = ["tests/fixtures"]
