@@ -21,6 +21,12 @@ from ripple.services import (
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample_fastapi_repo"
 
 
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    for key in ("REPO_PATH", "SCAN_EXCLUDE", "NEO4J_URI", "NEO4J_USER"):
+        monkeypatch.delenv(key, raising=False)
+
+
 class IsolatedSettings(Settings):
     """Settings that ignore a local .env file, so tests do not depend on it"""
 
