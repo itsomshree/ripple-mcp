@@ -10,6 +10,8 @@ ENV_KEYS = (
     "MCP_AUTH_TOKEN",
     "REPO_PATH",
     "LOG_LEVEL",
+    "SCAN_EXCLUDE",
+    "LOG_LEVEL",
 )
 
 
