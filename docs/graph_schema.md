@@ -48,8 +48,8 @@ importer transitively.
 
 A `File` source means a module-level call (including decorators and default
 arguments). Instantiating a class emits an edge to the `Class` and, if one
-exists in the class or its in-repo bases, to its `__init__`. Resolution is
-exact-only: no type inference. Multiple call sites between the same pair
+exists in the class or its in-repo bases, to its `__init__`. Resolution is exact-only: 
+no type inference apart from instance binding (below). Multiple call sites between the same pair
 collapse into one edge.
 
 Calls that can't be resolved are not edges. They are kept on
@@ -57,7 +57,7 @@ Calls that can't be resolved are not edges. They are kept on
 
 | Reason | Meaning |
 |---|---|
-| `external` | Lands in code outside the repo (or in an inherited external method) |
+| `external` | Lands in code outside the repo: an external function, an inherited external method, or a method on an instance of an external class |
 | `builtin` | Python builtin |
 | `unknown_receiver` | Receiver type unknown, e.g. `self.repo.save()` or `svc.create()` |
 | `ambiguous` | Module name matches more than one file |
@@ -65,6 +65,44 @@ Calls that can't be resolved are not edges. They are kept on
 
 Each entry carries `kind` (`call` by default, `depends` for unresolved
 `DEPENDS_ON` targets) so diagnostics can tell them apart.
+
+### Instances and local names
+
+A name bound exactly once, in its own scope, to a call of an in-repo class is
+treated as an instance of that class: `limiter = RateLimiter(60)` at module
+level (including inside `if` / `try`), or `b = GraphBuilder()` in a function.
+A name that is also reassigned, or bound by a loop, `with`, `except`, a
+parameter, a nested def, an import, `global` or `nonlocal`, is not an instance.
+Class-body attributes and `self.x = Cls()` are not covered.
+
+- `x.method(...)` resolves to the method, bases included.
+- A bare `x(...)`, or `Depends(x)`, resolves to `__call__` only, not to the class
+  or its `__init__`.
+- It works across files through the same import and `__init__` re-export rules
+  as any other name.
+- If the constructor is external (`HTTPBearer()`, `FastAPI()`), uses are
+  `external`. If it is an in-repo function or cannot be resolved, uses are
+  `unknown_receiver`. A missing method is `not_found` as the last segment of a
+  chain, `unknown_receiver` in the middle (`x.attr.run()`), and `external` when
+  a base class is external.
+
+Local names shadow outer ones. The lookup visits each enclosing function scope,
+innermost first (class bodies are skipped): a nested def or class, then an
+instance, then any other binding (parameter, assignment, loop, `with`, `except`
+or `match` capture), which stops the search with `unknown_receiver`. A
+parameter named like a module-level function or instance therefore no longer
+links to it. The same lookup is used for ORM model references, so a parameter
+named like a model is not mistaken for the model. Function-local imports do not
+shadow: imports are read file-wide.
+
+### Celery tasks
+
+A function decorated with `task` or `shared_task` (`@celery_app.task(name=...)`,
+`@shared_task`) is a task. `task.delay(...)` and `task.apply_async(...)`, as the
+last segment of the call, resolve to the function itself, so the producer
+reaches the task. Other attributes (`.s()`, `.retry`) stay unresolved, and a
+function that is not decorated is not treated as a task. Detection is by
+decorator name only.
 
 ### HANDLES and APIEndpoint
 
@@ -325,7 +363,7 @@ Impact is only as good as the edges. These changes are missed:
 - Functions passed as callbacks, apart from FastAPI `Depends`.
 - Tests that reach code only through pytest fixtures.
 - Router-level and app-level `dependencies=[...]`.
-- Calls through local variables (`unknown_receiver`).
+- Calls through parameters, `self.<attr>` and call results (`unknown_receiver`).
 
 Class-level table expansion over-approximates on purpose: raw-SQL users of the
 same table and other models on it are included.
@@ -528,23 +566,51 @@ Incomplete data never changes the score silently. It appears in
 
 ## Known gaps
 
+### Calls and receivers
+
+- Receiver types are not inferred beyond instance binding. Calls through a
+  parameter (even one annotated with a repo class), `self.<attr>`
+  (`self._store.execute(...)`) and the result of a call are `unknown_receiver`.
+  Measured after instance binding: 760 of the ripple-mcp scan's unresolved
+  calls and 362 of a FastAPI app's. Most are standard-library and third-party
+  methods, which cannot resolve to repo code anyway, and only 142 and 6 start
+  with `self.`. Repo-class calls through typed parameters (`builder.build`,
+  `view.edges`) are the part that annotations could resolve.
+- Instance binding covers `x = Cls(...)` bound once at module or function
+  level. Not covered: `self.x = Cls()`, class-body attributes, conditional
+  expressions and tuple unpacking, and names rebound through `nonlocal` in a
+  nested function (the enclosing function does not see the rebinding).
+- Lambda parameters do not shadow: the calls in a lambda body belong to the
+  enclosing function, so `lambda helper: helper()` can link to a module-level
+  `helper`. Comprehension variables count as locals of the enclosing function
+  for its whole body, which can only hide a name and drop an edge.
 - `super().method()` is recorded only as a call to `super`.
-- Only FastAPI dependencies are handled as passed-not-called functions. Other
-  callbacks (`background_tasks.add_task(f)`, `map(f, xs)`) leave no edge.
-- Not yet covered for dependencies: router-level and app-level
-  `dependencies=[...]`, module-level aliases such as
-  `DbSession = Annotated[Session, Depends(get_db)]`, bare `Depends()` (type
-  taken from the annotation), and `Depends(lambda: ...)` or other non-dotted
-  targets.
+- Only FastAPI dependencies and Celery `.delay` / `.apply_async` are handled as
+  passed-not-called functions. Other callbacks (`background_tasks.add_task(f)`,
+  `map(f, xs)`, `task.s()`) leave no edge.
+- A directory named like an installed package (`alembic/`, which holds
+  migration scripts) becomes a repo module that shadows the real package, so
+  calls into the package are `not_found` instead of `external`. No wrong edge
+  is created; exclude the directory (`--exclude`, `SCAN_EXCLUDE`) if the
+  labels matter.
+
+### Dependencies
+
+- Not yet covered: router-level and app-level `dependencies=[...]`,
+  module-level aliases such as `DbSession = Annotated[Session, Depends(get_db)]`,
+  bare `Depends()` (type taken from the annotation), and `Depends(lambda: ...)`
+  or other non-dotted targets.
 - Dependency expressions on methods resolve from module level, so a sibling
   method referenced by bare name (legal in a class body) reports `not_found`.
-- Calls through local variables are `unknown_receiver`.
+
+### Models and SQL
+
 - Models are found only through `__tablename__` / `__abstract__` in the class
   body. Classes mapped with `__table__ = Table(...)`, Core `Table("users",
   metadata)` objects, and imperative mapping are not detected. Nested model
   classes (`Outer.Inner`) are only found through the inner class's own name.
-- Table names drop schema prefixes, so `public.users` and `audit.users` are
-  the same node.
+- Table names drop schema prefixes, so `public.users` and `audit.users` are the
+  same node.
 - SQL held anywhere other than a single-assignment literal in the same file is
   not read: constants imported from another module, class attributes
   (`self.QUERY`), parameters, and strings built from variables. Only the
@@ -555,34 +621,31 @@ Incomplete data never changes the score silently. It appears in
 - ORM usage is syntactic. Relationship traversal (`user.orders`),
   `session.delete(obj)`, and model instances held in variables leave no edge.
   Reads over-approximate: any reference in a function body counts, including
-  `isinstance(x, User)`. Writes are narrow and by name only
-  (`d.update(defaults)` marks `defaults`, which never resolves to a model).
-- A local variable or parameter named like a model class is not detected as
-  shadowing it.
-  - Pytest fixtures are not propagated. A fixture is injected by parameter name,
+  `isinstance(x, User)`. Writes are narrow and by name only (`d.update(defaults)`
+  marks `defaults`, which never resolves to a model).
+
+### Tests and impact
+
+- Pytest fixtures are not propagated. A fixture is injected by parameter name,
   not called, so source reached only through a fixture (`client` built from the
   app) is not linked to the tests that use it. `Evidence.NAME` is reserved for
   name-based links and is not produced yet.
 - Test coverage is over-approximate in one way: any helper call counts, even on
-  a branch that does not run. It is under-approximate in another: calls through
-  local variables are `unknown_receiver`, so `c = Client(); c.run()` links
-  `Client` but not `run`.
+  a branch that does not run. It is under-approximate in another: a parameter,
+  `self.<attr>` or call result has no known type, so a test that gets its object
+  from a fixture links nothing through it.
 - `via` does not distinguish a direct call from one reached through helpers.
 - Impact analysis follows only edges the graph has; see "Blind spots" under
   "Impact analysis" (inheritance, annotation references and callbacks are the
   main misses).
-  - Entity resolution matches an endpoint only by its declared route
+- Entity resolution matches an endpoint only by its declared route
   (`GET /users/{user_id}`). A concrete path such as `GET /users/42` does not
   resolve; it would need `EndpointIndex` and all endpoints loaded.
-  - Function parameters and local variables do not shadow module-level names.
-  A parameter named like a module-level function (typically a pytest fixture:
-  `def q(...)` used as `def test_x(q): q.find_nodes()`) resolves to that
-  function, so the call is reported as `not_found` instead of
-  `unknown_receiver`, and a bare call through such a parameter would link to
-  the wrong function.
-- Receiver types are not inferred. Method calls through a local, a parameter
-  annotated with a repo class, or `self.<attr>` (`builder.add(...)`,
-  `view.edges(...)`, `self._store.execute(...)`) are `unknown_receiver`. On
-  this project's own source about 60% of the most frequent unresolved targets
-  are repo-class calls of this kind; the rest are builtin and standard-library
-  methods, which cannot resolve to repo code anyway.
+
+### Server
+
+- `ScanError` messages carry the server-side path (for example `repo path is
+  not a directory: /srv/...`) and reach the client unchanged. That is fine over
+  local stdio; scrub it before a remote deployment.
+- `scan_repo` is wipe-then-write and not atomic: a Neo4j failure part-way
+  leaves a partial graph until the next scan.
