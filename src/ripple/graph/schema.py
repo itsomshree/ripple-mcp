@@ -207,12 +207,21 @@ class ImportRef(BaseModel):
     line: int
 
 
+class InstanceRef(BaseModel):
+    scope_id: str
+    var: str
+    ctor: str
+    line: int
+
+
 class ParsedFile(BaseModel):
     path: str
     nodes: list[Node] = Field(default_factory=list)
     edges: list[Edge] = Field(default_factory=list)
     calls: list[CallRef] = Field(default_factory=list)
     imports: list[ImportRef] = Field(default_factory=list)
+    instances: list[InstanceRef] = Field(default_factory=list)
+    bound: dict[str, list[str]] = Field(default_factory=dict)
     error: str | None = None
 
 
