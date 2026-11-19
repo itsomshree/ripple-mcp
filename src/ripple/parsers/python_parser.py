@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -14,11 +15,13 @@ from ripple.graph.schema import (
     FileNode,
     FunctionNode,
     ImportRef,
+    InstanceRef,
     Node,
     ParsedFile,
     file_id,
     symbol_id,
 )
+from ripple.parsers.scopes import collect_bindings, parameter_names
 
 
 def parse_python_file(abs_path: Path, rel_path: str) -> ParsedFile:
@@ -53,6 +56,7 @@ def parse_python_source(
 
     collector = _Collector(path)
     collector.visit(tree)
+    collector.record_module(tree)
 
     return ParsedFile(
         path=path,
@@ -60,6 +64,8 @@ def parse_python_source(
         edges=collector.edges,
         calls=collector.calls,
         imports=collector.imports,
+        instances=collector.instances,
+        bound=collector.bound,
     )
 
 
@@ -84,6 +90,10 @@ def _dotted_name(expr: ast.expr) -> str | None:
     return None
 
 
+def _call_target(value: ast.expr) -> str | None:
+    return _dotted_name(value.func) if isinstance(value, ast.Call) else None
+
+
 @dataclass(frozen=True)
 class _Scope:
     kind: Literal["class", "function"]
@@ -99,6 +109,8 @@ class _Collector(ast.NodeVisitor):
         self.edges: list[Edge] = []
         self.calls: list[CallRef] = []
         self.imports: list[ImportRef] = []
+        self.instances: list[InstanceRef] = []
+        self.bound: dict[str, list[str]] = {}
         self._scope: list[_Scope] = []
         self._seen: set[str] = set()
 
@@ -119,6 +131,36 @@ class _Collector(ast.NodeVisitor):
 
     def _defined_in(self, sid: str) -> None:
         self.edges.append(Edge(type=EdgeType.DEFINED_IN, src=sid, dst=self.file_id))
+
+    def _bind_scope(
+        self,
+        scope_id: str,
+        body: Iterable[ast.stmt],
+        params: Iterable[str] = (),
+        extra: Iterable[str] = (),
+        keep_names: bool = True,
+    ) -> None:
+        found = collect_bindings(body, params, extra)
+        if keep_names and found.names:
+            self.bound[scope_id] = sorted(found.names)
+        for var in sorted(found.single):
+            assignment = found.single[var]
+            ctor = _call_target(assignment.value)
+            if ctor is not None:
+                self.instances.append(
+                    InstanceRef(
+                        scope_id=scope_id, var=var, ctor=ctor, line=assignment.line
+                    )
+                )
+
+    def record_module(self, tree: ast.Module) -> None:
+        rebound = [
+            name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Global)
+            for name in node.names
+        ]
+        self._bind_scope(self.file_id, tree.body, extra=rebound, keep_names=False)
 
     @staticmethod
     def _span_start(
@@ -195,6 +237,7 @@ class _Collector(ast.NodeVisitor):
                 )
             )
             self._defined_in(sid)
+            self._bind_scope(sid, node.body, parameter_names(node.args))
 
         self._scope.append(_Scope("function", qualname, sid))
         for stmt in node.body:
