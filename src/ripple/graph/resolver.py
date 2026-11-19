@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Literal
 
-from ripple.graph.schema import ParsedFile, SymbolNode
+from ripple.graph.schema import InstanceRef, ParsedFile, SymbolNode
 
 DEFAULT_SOURCE_ROOTS: tuple[str, ...] = ("src", "")
 
@@ -116,6 +116,8 @@ class ModuleResolver:
         self._parsed = parsed
         self.index = ModuleIndex(parsed, source_roots)
         self.top_level: dict[str, set[str]] = {}
+        self.instances: dict[str, dict[str, InstanceRef]] = {}
+        self.bound: dict[str, frozenset[str]] = {}
         self._from_imports: dict[str, dict[str, tuple[str, str]]] = {}
         self._stars: dict[str, list[str]] = {}
         self._cache: dict[str, FileImports] = {}
@@ -141,6 +143,10 @@ class ModuleResolver:
                         froms[asname or name] = (mod, name)
             self._from_imports[path] = froms
             self._stars[path] = stars
+            for ref in pf.instances:
+                self.instances.setdefault(ref.scope_id, {})[ref.var] = ref
+            for scope_id, names in pf.bound.items():
+                self.bound[scope_id] = frozenset(names)
 
     # public
     def imports(self, path: str) -> FileImports:
