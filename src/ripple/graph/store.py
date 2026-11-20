@@ -4,10 +4,11 @@ from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from typing import Any, Self
 
-from neo4j import Driver, GraphDatabase
+from neo4j import Driver, GraphDatabase, ManagedTransaction
 
 from ripple.config import Settings, get_settings
 from ripple.graph.builder import CodeGraph
+from ripple.graph.diff import EdgeChange, GraphDelta
 from ripple.graph.schema import NodeType
 
 
@@ -85,6 +86,13 @@ class GraphStore:
         self._write_nodes(graph)
         self._write_edges(graph)
 
+    def apply_delta(self, delta: GraphDelta) -> None:
+        """Apply a delta in one transaction: it lands whole or not at all"""
+        if delta.is_empty:
+            return
+        with self._driver.session(database=self._database) as session:
+            session.execute_write(_apply_delta, delta)
+
     def _write_nodes(self, graph: CodeGraph) -> None:
         by_label: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for node_id in sorted(graph.nodes):
@@ -136,3 +144,67 @@ class GraphStore:
 def _batches(rows: Sequence[Any], size: int = 1000) -> Iterator[Sequence[Any]]:
     for i in range(0, len(rows), size):
         yield rows[i : i + size]
+
+
+def _edge_groups(
+    changes: Sequence[EdgeChange],
+) -> dict[tuple[str, str, str], list[dict[str, str]]]:
+    groups: dict[tuple[str, str, str], list[dict[str, str]]] = defaultdict(list)
+    for c in changes:
+        e = c.edge
+        groups[(e.type.value, c.src_label, c.dst_label)].append(
+            {
+                "src": e.src,
+                "dst": e.dst,
+                "access": e.access.value if e.access else "",
+                "via": e.via.value if e.via else "",
+            }
+        )
+    return groups
+
+
+def _apply_delta(tx: ManagedTransaction, delta: GraphDelta) -> None:
+    def run(query: str, key: str, rows: Sequence[Any]) -> None:
+        for batch in _batches(rows):
+            tx.run(query, {key: batch}).consume()
+
+    for (etype, src, dst), rows in sorted(_edge_groups(delta.edges_removed).items()):
+        run(
+            "UNWIND $rows AS r "
+            f"MATCH (a:`{src}` {{id: r.src}})"
+            f"-[e:`{etype}` {{access: r.access, via: r.via}}]->"
+            f"(b:`{dst}` {{id: r.dst}}) "
+            "DELETE e",
+            "rows",
+            rows,
+        )
+
+    gone: dict[str, list[str]] = defaultdict(list)
+    for node in delta.nodes_removed:
+        gone[node.type.value].append(node.id)
+    for label, ids in sorted(gone.items()):
+        run(
+            f"UNWIND $ids AS id MATCH (n:`{label}` {{id: id}}) DETACH DELETE n",
+            "ids",
+            ids,
+        )
+
+    upserts: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for node in (*delta.nodes_added, *delta.nodes_changed):
+        upserts[node.type.value].append({"id": node.id, "props": node.to_properties()})
+    for label, rows in sorted(upserts.items()):
+        run(
+            f"UNWIND $rows AS r MERGE (n:`{label}` {{id: r.id}}) SET n = r.props",
+            "rows",
+            rows,
+        )
+
+    for (etype, src, dst), rows in sorted(_edge_groups(delta.edges_added).items()):
+        run(
+            "UNWIND $rows AS r "
+            f"MATCH (a:`{src}` {{id: r.src}}) "
+            f"MATCH (b:`{dst}` {{id: r.dst}}) "
+            f"MERGE (a)-[:`{etype}` {{access: r.access, via: r.via}}]->(b)",
+            "rows",
+            rows,
+        )
