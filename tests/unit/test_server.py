@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 import threading
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ TOOLS = {
     "affected_tests",
     "scan_repo",
     "status",
+    "rescan",
 }
 
 
@@ -43,7 +45,7 @@ async def scanned(client):
 
 
 # registration
-async def test_exactly_the_five_tools_with_output_schemas(client):
+async def test_exactly_the_six_tools_with_output_schemas(client):
     tools = await client.list_tools()
     assert {t.name for t in tools} == TOOLS
     assert all(t.output_schema is not None for t in tools)
@@ -146,3 +148,44 @@ async def test_status_and_queries_answer_while_a_scan_runs():
             release.set()
         done = await asyncio.wait_for(scan, 10)
         assert structured(done)["summary"]["files_scanned"] == 13
+
+
+async def test_rescan_after_a_scan_changes_nothing(scanned):
+    r = await call(scanned, "rescan")
+    assert r["status"] == "ok"
+    assert r["summary"]["files_added"] == 13
+    assert set(r["summary"]["graph_delta"].values()) == {0}
+    assert "already matches" in r["message"]
+
+    again = await call(scanned, "rescan")
+    assert again["summary"]["files_added"] == 0
+    assert again["summary"]["files_unchanged"] == 13
+
+
+async def test_rescan_picks_up_an_edit(tmp_path):
+    repo = tmp_path / "repo"
+    shutil.copytree(FIXTURE, repo)
+    async with Client(build_server(InMemoryServices(repo_path=repo))) as c:
+        await call(c, "scan_repo")
+        await call(c, "rescan")
+
+        db = repo / "app" / "db.py"
+        db.write_text(db.read_text() + "\n\ndef extra():\n    return get_session()\n")
+
+        r = await call(c, "rescan")
+        assert r["summary"]["files_changed"] == 1
+        assert r["summary"]["graph_delta"] == {
+            "nodes_added": 1,
+            "nodes_changed": 1,
+            "nodes_removed": 0,
+            "edges_added": 2,
+            "edges_removed": 0,
+        }
+        found = await call(c, "what_breaks_if_i_change", entity="extra")
+        assert found["status"] == "ok"
+
+
+async def test_rescan_without_a_repo_raises_tool_error():
+    async with Client(build_server(InMemoryServices())) as c:
+        with pytest.raises(ToolError, match="REPO_PATH"):
+            await c.call_tool("rescan", {})
