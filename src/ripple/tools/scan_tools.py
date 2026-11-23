@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TypeVar
 
 from pydantic import Field
 
+from ripple.scanner.incremental import RescanSummary
 from ripple.scanner.repo_scanner import ScanSummary
 from ripple.services import ScanInProgress, Services
 from ripple.tools._common import ToolResult, ToolStatus
 
+_S = TypeVar("_S", bound=ScanSummary)
+
 
 class ScanToolResult(ToolResult):
     summary: ScanSummary | None = None
+
+
+class RescanToolResult(ToolResult):
+    summary: RescanSummary | None = None
 
 
 class StatusResult(ToolResult):
@@ -26,7 +34,7 @@ class StatusResult(ToolResult):
     last_scan_at: str | None = None
 
 
-def public_summary(summary: ScanSummary) -> ScanSummary:
+def public_summary(summary: _S) -> _S:
     """The summary as a client may see it: the repo's name, not the server path"""
     return summary.model_copy(update={"repo_path": Path(summary.repo_path).name})
 
@@ -41,6 +49,26 @@ def run_scan(services: Services) -> ScanToolResult:
             message="A scan is already running. Try again in a moment.",
         )
     return ScanToolResult(summary=public_summary(summary))
+
+
+def run_rescan(services: Services) -> RescanToolResult:
+    """Incremental scan: reparse changed files, write only the graph difference"""
+    try:
+        summary = services.rescan()
+    except ScanInProgress:
+        return RescanToolResult(
+            status=ToolStatus.SCAN_IN_PROGRESS,
+            message="A scan is already running. Try again in a moment.",
+        )
+    unchanged = not any(summary.graph_delta.values())
+    return RescanToolResult(
+        summary=public_summary(summary),
+        message=(
+            "No graph changes: the stored graph already matches the repository."
+            if unchanged
+            else None
+        ),
+    )
 
 
 def get_status(services: Services) -> StatusResult:
