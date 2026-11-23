@@ -290,10 +290,18 @@ Connection settings come from `ripple.config` (`NEO4J_URI`, `NEO4J_USER`,
   each `MATCH` uses the per-label `id` index.
 - `write_graph` is idempotent. `replace_graph` is a full replace
   (`ensure_schema`, `clear`, `write_graph`); it is what a full scan uses.
+  - `apply_delta` applies a `GraphDelta` (see "Incremental rescans") in one
+  transaction: edges out, nodes out, nodes in, edges in. Changed nodes are
+  written with `SET n = props`, not `+=`, so a property that became `None`
+  disappears. A failure rolls the whole delta back.
+- `sync_graph(store, graph)` (`graph/sync.py`) loads the stored graph, diffs
+  it against `graph` and applies the difference. It diffs against what is
+  stored, not against the last scan, so a partial store is repaired.
 
-Known limits: `clear` wipes the whole database, there is no per-file patching
-yet (planned for incremental rescans), and queries run in auto-commit sessions
-without retries.
+Known limits: `replace_graph` wipes the whole database and is not atomic (use
+`sync_graph` for incremental updates), `sync_graph` loads the entire stored
+graph each time, and queries run in auto-commit sessions without retries
+(`apply_delta` runs in `execute_write`, which does retry transient errors).
 
 ## Impact analysis
 
@@ -475,8 +483,8 @@ is kept). Symlinked files and directories are not followed. Files over
 
 **Parsing.** `parse_file(root, rel)` reads a file once, decodes it with
 `errors="replace"`, hashes the raw bytes, and runs the four `*_source`
-parsers (Python, FastAPI, DB, coverage). It is the unit an incremental rescan
-will call for changed files. A file with a syntax error still gets its `File`
+parsers (Python, FastAPI, DB, coverage). IncrementalScanner calls the same bytes-level 
+core (parse_bytes) for changed files only. A file with a syntax error still gets its `File`
 node and is reported in the summary; an unreadable file is counted and skipped.
 
 **Safety.** `replace_graph` wipes before it writes, so everything that can
@@ -493,10 +501,71 @@ summary is where they are visible. `summary.format()` renders it as text.
 [--dry-run]`. `--repo-path` defaults to `REPO_PATH`; `--dry-run` builds and
 prints the summary without needing Neo4j.
 
-Known limits: the write is wipe-then-write and not atomic, so a Neo4j failure
+Known limits: the scan_repo write is wipe-then-write and not atomic, so a Neo4j failure
 mid-write leaves a partial or empty graph until the next scan, and a query that
 runs during a scan sees a partial graph. Each file is parsed four times (one
 `ast.parse` per parser); sharing one tree would need a parser API change.
+
+## Incremental rescans
+
+`scanner/incremental.py` keeps parsed facts between scans so that a rescan
+costs less than a full scan. `IncrementalScanner(repo, ...).refresh()` returns
+a `Refresh(result, changes)`; `build_graph` is one `refresh()` on a fresh
+scanner, so a full scan and a rescan share one code path.
+
+**Change detection** is by content hash: each refresh reads and hashes every
+discovered file and reparses those whose hash differs from the cached one.
+Git is not consulted, so uncommitted and untracked edits, branch switches and
+non-git directories behave the same. `FileChanges` lists the added, changed
+and removed paths and counts the unchanged. A file that vanishes is removed
+from the builder. A syntax error stays reported in the summary for as long as
+the file is unchanged and broken.
+
+**The graph is rebuilt, not patched.** Resolution is cross-file: a new
+definition can make another file's call resolve, a changed prefix changes
+endpoint paths in other files, a new base class changes `MAPS_TO` for
+subclasses elsewhere. So `GraphBuilder.build()` always runs over every cached
+fact, and the saving is the parse. Patching per file would leave stale edges.
+
+**The store is synced by diff.** `diff_graphs(old, new)` returns a
+`GraphDelta`: nodes added, changed (same id and label, new properties) and
+removed, and edges added and removed, each edge carrying its endpoint labels
+so Neo4j can use the per-label `id` index. Output is sorted, so it is
+deterministic. A node whose label changed with its id kept (a `Test*` class
+that gains `__init__` demotes its methods from `Test` to `Function`) is a
+removal plus an addition, and every edge touching it is removed and re-added,
+because `DETACH DELETE` drops them.
+
+**Failure behaviour.** A refresh reads and parses before it mutates, so a
+`ScanError` ("no readable Python files") leaves the cache usable. If the store
+write fails after a successful refresh, the cache is ahead of the store, and
+the next `rescan` still repairs the store because it diffs against what is
+stored.
+
+**Result.** `RescanSummary` is a `ScanSummary` plus `files_added`,
+`files_changed`, `files_removed`, `files_unchanged` and `graph_delta` (the
+delta's counts). `rescan` reports "no graph changes" when every count is zero.
+
+**Measured** (`scripts/bench_rescan.py`, median of 10 runs, 81 files / 438
+nodes / 1066 edges): a cold scan takes 464 ms, of which about 430 ms is
+parsing. An idle rescan takes 34 ms (reading and hashing about 8 ms, `build()`
+26 ms) and a rescan after a one-file edit about the same, so the incremental
+path is roughly 13x faster here. The delta diff takes 2 ms. After the cache is
+warm, `build()` is the largest remaining cost. One machine, one repo, a small
+edit: treat the ratio as indicative, not a guarantee.
+
+Known limits:
+
+- Every refresh still reads and hashes every file; only parsing is skipped. A
+  stat-based shortcut would remove that cost.
+- The cache is per process. After a restart, or after `scan_repo` (which
+  does not fill it), the first `rescan` reparses everything.
+- `sync_graph` loads the whole stored graph and applies the delta in one
+  transaction, so a very large delta is one large transaction.
+- `sync_graph` assumes nothing else writes between its load and its apply;
+  `ScanGate` guarantees that within one server.
+- Queries are refused while a rescan runs, even though the transactional write
+  would allow reads.
 
 ## Risk scoring
 
