@@ -8,6 +8,7 @@ from pydantic_settings import SettingsConfigDict
 
 from ripple.config import Settings
 from ripple.graph.builder import CodeGraph
+from ripple.graph.diff import diff_graphs
 from ripple.graph.store import GraphStore
 from ripple.scanner.repo_scanner import ScanError, ScanResult, ScanSummary
 from ripple.services import (
@@ -181,7 +182,7 @@ def test_queries_and_scans_are_refused_while_a_scan_runs():
     release.set()
     t.join(5)
     assert services.status().scanning is False
-    services.graph()  # readable again
+    services.graph()
 
 
 def test_status_reports_counts_and_the_repo_name_only():
@@ -203,3 +204,119 @@ def test_status_survives_an_unreachable_store():
     assert st.store_ok is False
     assert st.store_error is not None and "connection refused" in st.store_error
     assert st.nodes == {} and st.edges == {}
+
+
+def _write(root: Path, rel: str, text: str) -> None:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(text)
+
+
+# rescan, in memory
+def test_in_memory_rescan_reports_file_and_graph_changes(tmp_path):
+    _write(tmp_path, "a.py", "def f(): ...\n")
+    s = InMemoryServices(repo_path=tmp_path)
+    s.scan()
+
+    first = s.rescan()
+    assert (first.files_added, first.files_unchanged) == (1, 0)
+    assert set(first.graph_delta.values()) == {0}
+
+    second = s.rescan()
+    assert (second.files_added, second.files_unchanged) == (0, 1)
+
+    _write(tmp_path, "a.py", "def f(): ...\ndef g(): ...\n")
+    third = s.rescan()
+    assert third.files_changed == 1
+    assert third.graph_delta == {
+        "nodes_added": 1,
+        "nodes_changed": 1,
+        "nodes_removed": 0,
+        "edges_added": 1,
+        "edges_removed": 0,
+    }
+    assert s.status().last_scan == third
+
+
+def test_in_memory_rescan_needs_a_repo():
+    with pytest.raises(ScanError, match="REPO_PATH"):
+        InMemoryServices().rescan()
+
+
+def test_a_rescan_is_refused_while_another_runs(tmp_path):
+    _write(tmp_path, "a.py", "def f(): ...\n")
+    started, release = threading.Event(), threading.Event()
+
+    class SlowRescan(InMemoryServices):
+        def _rescan(self):
+            started.set()
+            release.wait(5)
+            return super()._rescan()
+
+    s = SlowRescan(repo_path=tmp_path)
+    t = threading.Thread(target=s.rescan)
+    t.start()
+    assert started.wait(5)
+    with pytest.raises(ScanInProgress):
+        s.rescan()
+    with pytest.raises(ScanInProgress):
+        s.graph()
+    release.set()
+    t.join(5)
+    assert s.status().scanning is False
+
+
+# rescan, Neo4j services with a fake store and a fake sync
+def test_neo4j_rescan_syncs_the_store_and_reuses_its_cache(monkeypatch, tmp_path):
+    _write(tmp_path, "a.py", "def f(): ...\n")
+    synced = []
+
+    def fake_sync(store, graph):
+        synced.append((store, graph))
+        return diff_graphs(CodeGraph(), graph)
+
+    monkeypatch.setattr("ripple.services.sync_graph", fake_sync)
+    services, store, calls = make(repo_path=tmp_path)
+
+    first = services.rescan()
+    assert synced[0][0] is store
+    assert (first.files_added, first.files_unchanged) == (1, 0)
+    assert first.graph_delta["nodes_added"] == 2  # File + Function
+    assert services.status().last_scan == first
+
+    second = services.rescan()
+    assert (second.files_added, second.files_unchanged) == (0, 1)
+    assert calls == [1]
+
+
+def test_neo4j_rescan_without_a_repo_path_fails_before_touching_the_store():
+    services, _, calls = make()
+    with pytest.raises(ScanError, match="REPO_PATH"):
+        services.rescan()
+    assert calls == []
+
+
+def test_a_store_failure_during_rescan_propagates_and_the_next_one_heals(
+    monkeypatch, tmp_path
+):
+    _write(tmp_path, "a.py", "def f(): ...\n")
+    outcomes = []
+
+    def flaky_sync(store, graph):
+        outcomes.append(graph)
+        if len(outcomes) == 1:
+            raise ServiceUnavailable("down")
+        return diff_graphs(CodeGraph(), graph)
+
+    monkeypatch.setattr("ripple.services.sync_graph", flaky_sync)
+    services, _, _ = make(repo_path=tmp_path)
+
+    with pytest.raises(ServiceUnavailable):
+        services.rescan()
+    assert services.status().scanning is False
+    assert services.status().last_scan is None
+
+    healed = services.rescan()
+    assert healed.files_unchanged == 1
+    assert healed.graph_delta["nodes_added"] == 2
+    assert len(outcomes[1].nodes) == 2
