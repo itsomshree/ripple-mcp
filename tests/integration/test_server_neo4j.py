@@ -55,6 +55,25 @@ async def test_scan_through_the_server_writes_the_graph_to_neo4j(clients, store)
     assert s["repo"] == "sample_fastapi_repo"
 
 
+async def test_rescan_matches_between_the_two_stores(clients):
+    mem, neo = clients
+    assert _without_timing(await call(neo, "rescan")) == _without_timing(
+        await call(mem, "rescan")
+    )
+
+
+async def test_rescan_repairs_a_damaged_store(clients, store):
+    _, neo = clients
+    before = store.counts()
+    store.execute("MATCH (n:Function) WITH n LIMIT 3 DETACH DELETE n")
+    assert store.counts() != before
+
+    r = await call(neo, "rescan")
+    assert r["summary"]["graph_delta"]["nodes_added"] == 3
+    assert r["summary"]["graph_delta"]["edges_added"] > 0
+    assert store.counts() == before
+
+
 CASES = [
     ("what_breaks_if_i_change", {"entity": "UserService.get"}),
     ("what_breaks_if_i_change", {"entity": "app/models.py::User", "max_hops": 8}),
