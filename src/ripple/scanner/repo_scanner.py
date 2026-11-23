@@ -5,7 +5,6 @@ import hashlib
 import logging
 import os
 import time
-from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,7 +12,7 @@ from typing import Protocol
 
 from pydantic import BaseModel, Field
 
-from ripple.graph.builder import CodeGraph, GraphBuilder
+from ripple.graph.builder import CodeGraph
 from ripple.graph.resolver import DEFAULT_SOURCE_ROOTS
 from ripple.graph.schema import CoverageFacts, DBFacts, FastAPIFacts, ParsedFile
 from ripple.parsers.db_parser import parse_db_source
@@ -121,23 +120,26 @@ class FileBundle:
 
 
 # per-file parsing
-def parse_file(root: Path, rel: str) -> FileBundle:
-    """Read a file once and run every parser over it"""
-    raw = (root / rel).read_bytes()
+def parse_bytes(raw: bytes, rel: str, digest: str | None = None) -> FileBundle:
+    """Run every parser over one file's bytes"""
     source = raw.decode("utf-8", errors="replace")
+    digest = digest or hashlib.sha256(raw).hexdigest()
     return FileBundle(
-        parsed=parse_python_source(
-            source, rel, content_hash=hashlib.sha256(raw).hexdigest()
-        ),
+        parsed=parse_python_source(source, rel, content_hash=digest),
         facts=parse_fastapi_source(source, rel),
         db=parse_db_source(source, rel),
         cov=parse_coverage_source(source, rel),
     )
 
 
+def parse_file(root: Path, rel: str) -> FileBundle:
+    """Read a file once and run every parser over it"""
+    return parse_bytes((root / rel).read_bytes(), rel)
+
+
 # discovery
 @dataclass
-class _Found:
+class Found:
     files: list[str] = field(default_factory=list)
     excluded: int = 0
     too_large: int = 0
@@ -151,9 +153,9 @@ def _skip_dir(path: Path) -> bool:
     )
 
 
-def _discover(root: Path, exclude: tuple[str, ...], max_bytes: int) -> _Found:
+def discover_files(root: Path, exclude: tuple[str, ...], max_bytes: int) -> Found:
     patterns = tuple(p.replace("\\", "/") for p in exclude)
-    found = _Found()
+    found = Found()
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
         dirnames[:] = sorted(d for d in dirnames if not _skip_dir(base / d))
@@ -179,7 +181,7 @@ def _discover(root: Path, exclude: tuple[str, ...], max_bytes: int) -> _Found:
     return found
 
 
-def _resolve_root(repo_path: str | Path) -> Path:
+def resolve_root(repo_path: str | Path) -> Path:
     root = Path(repo_path).expanduser().resolve()
     if not root.is_dir():
         raise ScanError(f"repo path is not a directory: {root}")
@@ -195,52 +197,15 @@ def build_graph(
     max_file_bytes: int = MAX_FILE_BYTES,
 ) -> ScanResult:
     """Walk, parse and build the graph in memory. Never touches Neo4j"""
-    started = time.perf_counter()
-    root = _resolve_root(repo_path)
-    patterns = (exclude,) if isinstance(exclude, str) else tuple(exclude)
-    found = _discover(root, patterns, max_file_bytes)
+    from ripple.scanner.incremental import IncrementalScanner
 
-    summary = ScanSummary(
-        repo_path=str(root),
-        files_excluded=found.excluded,
-        files_too_large=found.too_large,
+    scanner = IncrementalScanner(
+        repo_path,
+        exclude=exclude,
+        source_roots=source_roots,
+        max_file_bytes=max_file_bytes,
     )
-    builder = GraphBuilder(source_roots)
-    for rel in found.files:
-        try:
-            bundle = parse_file(root, rel)
-        except OSError as exc:
-            logger.warning("cannot read %s: %s", rel, exc)
-            summary.files_unreadable += 1
-            continue
-        summary.files_scanned += 1
-        if bundle.parsed.error is not None:
-            summary.parse_error_count += 1
-            if len(summary.parse_errors) < MAX_LISTED_ERRORS:
-                summary.parse_errors.append(
-                    FileError(path=rel, error=bundle.parsed.error)
-                )
-        builder.add(bundle.parsed, bundle.facts, bundle.db, bundle.cov)
-
-    if summary.files_scanned == 0:
-        raise ScanError(f"no readable Python files found under {root}")
-
-    graph = builder.build()
-    summary.nodes = dict(Counter(n.type.value for n in graph.nodes.values()))
-    summary.edges = dict(Counter(e.type.value for e in graph.edges))
-    summary.route_issues = dict(Counter(i.reason.value for i in graph.route_issues))
-    summary.db_issues = dict(Counter(i.reason.value for i in graph.db_issues))
-    summary.unresolved = {
-        reason.value: n for reason, n in graph.unresolved_by_reason().items()
-    }
-    summary.duration_seconds = time.perf_counter() - started
-    logger.info(
-        "scanned %d files into %d nodes and %d edges",
-        summary.files_scanned,
-        len(graph.nodes),
-        len(graph.edges),
-    )
-    return ScanResult(graph=graph, summary=summary)
+    return scanner.refresh().result
 
 
 def scan_repo(
