@@ -31,7 +31,14 @@ from ripple.tools.impact_tools import (
 from ripple.tools.impact_tools import (
     what_breaks_if_i_change as what_breaks_if_i_change_impl,
 )
-from ripple.tools.scan_tools import ScanToolResult, StatusResult, get_status, run_scan
+from ripple.tools.scan_tools import (
+    RescanToolResult,
+    ScanToolResult,
+    StatusResult,
+    get_status,
+    run_rescan,
+    run_scan,
+)
 from ripple.tools.trace_tools import DEFAULT_FLOW_LIMIT, TraceResult
 from ripple.tools.trace_tools import trace_request_flow as trace_request_flow_impl
 from ripple.utils.logging import configure_logging
@@ -42,6 +49,12 @@ READ_ONLY = {"readOnlyHint": True, "openWorldHint": False}
 REPLACES_GRAPH = {
     "readOnlyHint": False,
     "destructiveHint": True,
+    "idempotentHint": True,
+    "openWorldHint": False,
+}
+UPDATES_GRAPH = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
     "idempotentHint": True,
     "openWorldHint": False,
 }
@@ -91,8 +104,10 @@ def build_server(services: Services) -> FastMCP:
         instructions=(
             "Change-impact analysis for a Python/FastAPI/PostgreSQL repo. "
             "Call `status` first; if the graph is empty, call `scan_repo`. "
-            "Then use `what_breaks_if_i_change`, `trace_request_flow` and "
-            "`affected_tests`. Results carry `caveats`: relay them, because "
+            "After the repo changes, call `rescan`: it reparses only changed "
+            "files and updates only what differs. `scan_repo` is the full "
+            "reset. Then use `what_breaks_if_i_change`, `trace_request_flow` "
+            "and `affected_tests`. Results carry `caveats`: relay them, because "
             "they say when an answer is only a lower bound."
         ),
     )
@@ -180,6 +195,25 @@ def build_server(services: Services) -> FastMCP:
         """
         try:
             return run_scan(services)
+        except ScanError as exc:
+            raise ToolError(str(exc)) from exc
+        except (DriverError, Neo4jError, OSError) as exc:
+            raise _store_error(exc) from exc
+
+    @mcp.tool(annotations=UPDATES_GRAPH)
+    def rescan() -> RescanToolResult:
+        """
+        Bring the graph up to date after the repository changed.
+
+        Reparses only files whose content changed and writes only the
+        difference to the store, so it is much cheaper than `scan_repo` on a
+        large repo. The first rescan after a server restart parses every file
+        once, then writes nothing if the graph already matches. Use
+        `scan_repo` instead to rebuild from scratch. Queries are refused with
+        status `scan_in_progress` while it runs.
+        """
+        try:
+            return run_rescan(services)
         except ScanError as exc:
             raise ToolError(str(exc)) from exc
         except (DriverError, Neo4jError, OSError) as exc:
