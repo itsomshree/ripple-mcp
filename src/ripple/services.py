@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 import threading
+import time
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from neo4j.exceptions import DriverError, Neo4jError
 
 from ripple.config import Settings, get_settings
 from ripple.graph.builder import CodeGraph
+from ripple.graph.diff import diff_graphs
 from ripple.graph.store import GraphStore
+from ripple.graph.sync import sync_graph
+from ripple.scanner.incremental import (
+    IncrementalScanner,
+    RescanSummary,
+    rescan_summary,
+)
 from ripple.scanner.repo_scanner import (
     ScanError,
     ScanResult,
@@ -23,6 +31,7 @@ from ripple.scanner.repo_scanner import (
 from ripple.tools._common import GraphAccess
 
 Scanner = Callable[..., ScanResult]
+_S = TypeVar("_S", bound=ScanSummary)
 
 
 class ScanInProgress(Exception):
@@ -51,6 +60,10 @@ class Services(Protocol):
         """Raises ScanInProgress, or ScanError if the repo cannot be scanned"""
         ...
 
+    def rescan(self) -> RescanSummary:
+        """Like scan, but reparses only changed files and writes only the diff"""
+        ...
+
     def status(self) -> ServiceStatus: ...
 
 
@@ -63,7 +76,7 @@ class ScanGate:
     def busy(self) -> bool:
         return self._lock.locked()
 
-    def run(self, scan: Callable[[], ScanSummary]) -> ScanSummary:
+    def run(self, scan: Callable[[], _S]) -> _S:
         if not self._lock.acquire(blocking=False):
             raise ScanInProgress()
         try:
@@ -94,6 +107,7 @@ class Neo4jServices:
         self._store: GraphStore | None = None
         self._store_lock = threading.Lock()
         self._gate = ScanGate()
+        self._incremental: IncrementalScanner | None = None
 
     def _get_store(self) -> GraphStore:
         with self._store_lock:
@@ -123,6 +137,22 @@ class Neo4jServices:
                 ).summary
             )
         )
+
+    def rescan(self) -> RescanSummary:
+        repo = self._settings.repo_path
+        if repo is None:
+            raise ScanError("REPO_PATH is not configured on the server")
+        return self._gate.run(lambda: self._rescan(repo))
+
+    def _rescan(self, repo: Path) -> RescanSummary:
+        started = time.perf_counter()
+        if self._incremental is None:
+            self._incremental = IncrementalScanner(
+                repo, exclude=self._settings.exclude_globs
+            )
+        refresh = self._incremental.refresh()
+        delta = sync_graph(self._get_store(), refresh.result.graph)
+        return rescan_summary(refresh, delta, time.perf_counter() - started)
 
     def status(self) -> ServiceStatus:
         last = self._gate.last
@@ -158,6 +188,7 @@ class InMemoryServices:
         self._repo_path = repo_path
         self._exclude = exclude
         self._gate = ScanGate()
+        self._incremental: IncrementalScanner | None = None
 
     def graph(self) -> GraphAccess:
         if self._gate.busy:
@@ -174,6 +205,23 @@ class InMemoryServices:
         result = build_graph(self._repo_path, exclude=self._exclude)
         self._graph = result.graph
         return result.summary
+
+    def rescan(self) -> RescanSummary:
+        if self._repo_path is None:
+            raise ScanError("REPO_PATH is not configured on the server")
+        return self._gate.run(self._rescan)
+
+    def _rescan(self) -> RescanSummary:
+        assert self._repo_path is not None
+        started = time.perf_counter()
+        if self._incremental is None:
+            self._incremental = IncrementalScanner(
+                self._repo_path, exclude=self._exclude
+            )
+        refresh = self._incremental.refresh()
+        delta = diff_graphs(self._graph, refresh.result.graph)
+        self._graph = refresh.result.graph
+        return rescan_summary(refresh, delta, time.perf_counter() - started)
 
     def status(self) -> ServiceStatus:
         last = self._gate.last
