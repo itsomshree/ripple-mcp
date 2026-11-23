@@ -15,6 +15,7 @@ TOOLS = {
     "affected_tests",
     "scan_repo",
     "status",
+    "rescan",
 }
 TIMEOUT = 30
 
