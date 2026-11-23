@@ -5,7 +5,7 @@ import pytest
 from ripple.scanner.repo_scanner import ScanError
 from ripple.services import InMemoryServices, ScanInProgress, ServiceStatus
 from ripple.tools._common import ToolStatus
-from ripple.tools.scan_tools import get_status, run_scan
+from ripple.tools.scan_tools import get_status, run_rescan, run_scan
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample_fastapi_repo"
 
@@ -73,3 +73,37 @@ def test_status_passes_a_store_failure_through():
     s = get_status(Down())
     assert s.store_ok is False and s.store_error == "connection refused"
     assert s.message is None
+
+
+def test_rescan_returns_the_summary_without_the_server_path():
+    r = run_rescan(InMemoryServices(repo_path=FIXTURE))
+    assert r.status is ToolStatus.OK
+    assert r.summary is not None
+    assert r.summary.repo_path == "sample_fastapi_repo"
+    assert (r.summary.files_added, r.summary.files_unchanged) == (13, 0)
+    # the in-memory graph started empty, so everything is new
+    assert r.summary.graph_delta["nodes_added"] == 48
+    assert r.summary.graph_delta["edges_added"] == 79
+    assert r.message is None
+
+
+def test_a_rescan_with_nothing_new_says_so():
+    services = InMemoryServices(repo_path=FIXTURE)
+    run_rescan(services)
+    again = run_rescan(services)
+    assert again.summary is not None and again.summary.files_unchanged == 13
+    assert again.message is not None and "already matches" in again.message
+
+
+def test_a_rescan_already_running_is_a_result_not_an_error():
+    class Busy(InMemoryServices):
+        def rescan(self):
+            raise ScanInProgress()
+
+    r = run_rescan(Busy())
+    assert r.status is ToolStatus.SCAN_IN_PROGRESS and r.summary is None
+
+
+def test_rescan_errors_propagate_for_the_tool_layer_to_raise():
+    with pytest.raises(ScanError):
+        run_rescan(InMemoryServices())
