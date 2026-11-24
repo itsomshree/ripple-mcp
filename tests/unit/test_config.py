@@ -11,7 +11,10 @@ ENV_KEYS = (
     "REPO_PATH",
     "LOG_LEVEL",
     "SCAN_EXCLUDE",
-    "LOG_LEVEL",
+    "MCP_TRANSPORT",
+    "MCP_HOST",
+    "MCP_PORT",
+    "PORT",
 )
 
 
@@ -63,3 +66,20 @@ def test_scan_exclude_is_split_into_globs(monkeypatch):
     assert make().exclude_globs == ()
     monkeypatch.setenv("SCAN_EXCLUDE", "tests/fixtures/*, migrations/* ,")
     assert make().exclude_globs == ("tests/fixtures/*", "migrations/*")
+
+
+def test_transport_defaults_are_local_and_safe(monkeypatch):
+    monkeypatch.setenv("NEO4J_PASSWORD", "pw-12345")
+    s = make()
+    assert (s.mcp_transport, s.mcp_host, s.mcp_port) == ("stdio", "127.0.0.1", 8000)
+
+
+def test_http_settings_and_platform_port(monkeypatch):
+    monkeypatch.setenv("NEO4J_PASSWORD", "pw-12345")
+    monkeypatch.setenv("MCP_TRANSPORT", "http")
+    monkeypatch.setenv("MCP_HOST", "0.0.0.0")
+    monkeypatch.setenv("PORT", "8080")
+    s = make()
+    assert (s.mcp_transport, s.mcp_host, s.mcp_port) == ("http", "0.0.0.0", 8080)
+    monkeypatch.setenv("MCP_PORT", "9000")
+    assert make().mcp_port == 9000
