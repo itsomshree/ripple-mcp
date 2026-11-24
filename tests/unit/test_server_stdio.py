@@ -27,6 +27,7 @@ class StdioServer:
         env = {
             **os.environ,
             "NEO4J_PASSWORD": "pw-12345",
+            "MCP_TRANSPORT": "stdio",
             "LOG_LEVEL": "DEBUG",
             "PYTHONUNBUFFERED": "1",
         }
