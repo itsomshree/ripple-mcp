@@ -9,11 +9,13 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from neo4j.exceptions import DriverError, Neo4jError
 from pydantic import Field, ValidationError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from ripple.analysis.affected_tests import DEFAULT_MAX_HOPS as TESTS_HOPS
 from ripple.analysis.impact import DEFAULT_MAX_HOPS as IMPACT_HOPS
 from ripple.analysis.request_flow import DEFAULT_MAX_HOPS as FLOW_HOPS
-from ripple.config import get_settings
+from ripple.config import Settings, get_settings
 from ripple.scanner.repo_scanner import ScanError
 from ripple.services import Neo4jServices, ScanInProgress, Services
 from ripple.tools._common import (
@@ -111,6 +113,10 @@ def build_server(services: Services) -> FastMCP:
             "they say when an answer is only a lower bound."
         ),
     )
+
+    @mcp.custom_route("/healthz", methods=["GET"])
+    async def healthz(_: Request) -> JSONResponse:
+        return JSONResponse({"status": "ok"})
 
     @mcp.tool(annotations=READ_ONLY)
     def what_breaks_if_i_change(
@@ -227,6 +233,18 @@ def build_server(services: Services) -> FastMCP:
     return mcp
 
 
+def run_server(mcp: FastMCP, settings: Settings) -> None:
+    if settings.mcp_transport == "http":
+        mcp.run(
+            transport="http",
+            host=settings.mcp_host,
+            port=settings.mcp_port,
+            show_banner=False,
+        )
+    else:
+        mcp.run(show_banner=False)
+
+
 def main() -> None:
     try:
         settings = get_settings()
@@ -237,7 +255,7 @@ def main() -> None:
     configure_logging(settings.log_level)
     services = Neo4jServices(settings)
     try:
-        build_server(services).run(show_banner=False)
+        run_server(build_server(services), settings)
     finally:
         services.close()
 
