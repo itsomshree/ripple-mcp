@@ -1,3 +1,5 @@
+import os
+import subprocess
 import threading
 from pathlib import Path
 
@@ -320,3 +322,44 @@ def test_a_store_failure_during_rescan_propagates_and_the_next_one_heals(
     assert healed.files_unchanged == 1
     assert healed.graph_delta["nodes_added"] == 2
     assert len(outcomes[1].nodes) == 2
+
+
+def _origin(path: Path) -> str:
+    path.mkdir()
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@t",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@t",
+    }
+    (path / "a.py").write_text("def f(): ...\n")
+    for args in (
+        ("init", "-q", "-b", "main"),
+        ("add", "-A"),
+        ("commit", "-q", "-m", "c"),
+    ):
+        subprocess.run(
+            ["git", *args], cwd=path, env=env, check=True, capture_output=True
+        )
+    return path.as_uri()
+
+
+def test_scan_clones_the_configured_remote_first(tmp_path):
+    services, store, _ = make(
+        repo_url=_origin(tmp_path / "o"), repo_checkout_dir=tmp_path / "co" / "repo"
+    )
+    assert services.scan().files_scanned == 1
+    assert len(store.graphs) == 1
+
+
+def test_a_failed_checkout_is_a_scan_error_without_details(tmp_path):
+    services, _, _ = make(
+        repo_url="https://127.0.0.1:1/x.git",
+        repo_token="s3cret",
+        repo_checkout_dir=tmp_path / "repo",
+    )
+    with pytest.raises(ScanError, match="checkout") as exc:
+        services.scan()
+    assert "s3cret" not in str(exc.value) and str(tmp_path) not in str(exc.value)
+    assert services.status().scanning is False
