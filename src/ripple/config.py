@@ -29,6 +29,10 @@ class Settings(BaseSettings):
 
     mcp_auth_token: SecretStr | None = None
     repo_path: Path | None = None
+    repo_url: str | None = None
+    repo_token: SecretStr | None = None
+    repo_branch: str | None = None
+    repo_checkout_dir: Path = Path("~/.cache/ripple/repo")
     scan_exclude: str = ""
     log_level: str = "INFO"
 
