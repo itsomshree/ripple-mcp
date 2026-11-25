@@ -2,12 +2,43 @@ services:
   neo4j:
     image: neo4j:5
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
     environment:
       NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
     volumes:
       - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p '${NEO4J_PASSWORD}' 'RETURN 1' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  app:
+    build: .
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      MCP_TRANSPORT: http
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: "8000"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      REPO_PATH: /repo
+      SCAN_EXCLUDE: ${SCAN_EXCLUDE:-}
+      REPO_URL: ${REPO_URL:-}
+      REPO_TOKEN: ${REPO_TOKEN:-}
+      REPO_BRANCH: ${REPO_BRANCH:-}
+    volumes:
+      - ${REPO_PATH:-./tests/fixtures/sample_fastapi_repo}:/repo:ro
+      - repo_cache:/data
 
 volumes:
   neo4j_data:
+  repo_cache:
