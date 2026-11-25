@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import Counter
@@ -16,6 +17,7 @@ from ripple.graph.builder import CodeGraph
 from ripple.graph.diff import diff_graphs
 from ripple.graph.store import GraphStore
 from ripple.graph.sync import sync_graph
+from ripple.scanner.checkout import CheckoutError, checkout_from_settings
 from ripple.scanner.incremental import (
     IncrementalScanner,
     RescanSummary,
@@ -32,6 +34,8 @@ from ripple.tools._common import GraphAccess
 
 Scanner = Callable[..., ScanResult]
 _S = TypeVar("_S", bound=ScanSummary)
+
+logger = logging.getLogger(__name__)
 
 
 class ScanInProgress(Exception):
@@ -102,6 +106,7 @@ class Neo4jServices:
         scanner: Scanner = scan_repo,
     ) -> None:
         self._settings = settings or get_settings()
+        self._checkout = checkout_from_settings(self._settings)
         self._store_factory = store_factory
         self._scanner = scanner
         self._store: GraphStore | None = None
@@ -126,26 +131,43 @@ class Neo4jServices:
             raise ScanInProgress()
         return GraphAccess.from_store(self._get_store())
 
+    def _repo_dir(self) -> Path:
+        if self._checkout is not None:
+            return self._checkout.dest
+        if self._settings.repo_path is None:
+            raise ScanError("REPO_PATH (or REPO_URL) is not configured on the server")
+        return self._settings.repo_path
+
+    def _sync_checkout(self) -> None:
+        if self._checkout is None:
+            return
+        try:
+            sha = self._checkout.sync()
+        except CheckoutError as exc:
+            logger.warning("repo checkout failed: %s", exc)
+            raise ScanError(
+                "could not update the repository checkout; see the server log"
+            ) from exc
+        logger.info("repo checkout at %s", sha[:12])
+
     def scan(self) -> ScanSummary:
-        repo = self._settings.repo_path
-        if repo is None:
-            raise ScanError("REPO_PATH is not configured on the server")
-        return self._gate.run(
-            lambda: (
-                self._scanner(
-                    repo, self._get_store(), exclude=self._settings.exclude_globs
-                ).summary
-            )
-        )
+        repo = self._repo_dir()
+
+        def run() -> ScanSummary:
+            self._sync_checkout()
+            return self._scanner(
+                repo, self._get_store(), exclude=self._settings.exclude_globs
+            ).summary
+
+        return self._gate.run(run)
 
     def rescan(self) -> RescanSummary:
-        repo = self._settings.repo_path
-        if repo is None:
-            raise ScanError("REPO_PATH is not configured on the server")
+        repo = self._repo_dir()
         return self._gate.run(lambda: self._rescan(repo))
 
     def _rescan(self, repo: Path) -> RescanSummary:
         started = time.perf_counter()
+        self._sync_checkout()
         if self._incremental is None:
             self._incremental = IncrementalScanner(
                 repo, exclude=self._settings.exclude_globs
@@ -158,7 +180,9 @@ class Neo4jServices:
         last = self._gate.last
         common = {
             "store": "neo4j",
-            "repo": _repo_name(self._settings.repo_path),
+            "repo": _repo_name(
+                self._checkout.dest if self._checkout else self._settings.repo_path
+            ),
             "scanning": self._gate.busy,
             "last_scan": last[0] if last else None,
             "last_scan_at": last[1] if last else None,
