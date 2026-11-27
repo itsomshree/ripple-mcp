@@ -184,7 +184,8 @@ def discover_files(root: Path, exclude: tuple[str, ...], max_bytes: int) -> Foun
 def resolve_root(repo_path: str | Path) -> Path:
     root = Path(repo_path).expanduser().resolve()
     if not root.is_dir():
-        raise ScanError(f"repo path is not a directory: {root}")
+        logger.warning("repo path is not a directory: %s", root)
+        raise ScanError("repo path is not a directory")
     return root
 
 
