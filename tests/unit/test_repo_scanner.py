@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 
@@ -196,3 +197,16 @@ def test_format_lists_counts_and_parse_errors(tmp_path):
     assert "files: 2 scanned" in text
     assert "parse errors: 1" in text
     assert "broken.py: SyntaxError" in text
+
+
+def test_scan_errors_do_not_carry_the_server_path(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(ScanError) as missing:
+            scan_repo(tmp_path / "nope", FakeStore())
+        with pytest.raises(ScanError) as empty:
+            scan_repo(tmp_path, FakeStore())
+
+    for exc in (missing, empty):
+        assert str(tmp_path) not in str(exc.value)
+    assert "not a directory" in caplog.text
+    assert "no readable Python files" in caplog.text
