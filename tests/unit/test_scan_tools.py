@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 import pytest
@@ -5,7 +6,7 @@ import pytest
 from ripple.scanner.repo_scanner import ScanError
 from ripple.services import InMemoryServices, ScanInProgress, ServiceStatus
 from ripple.tools._common import ToolStatus
-from ripple.tools.scan_tools import get_status, run_rescan, run_scan
+from ripple.tools.scan_tools import STORE_UNAVAILABLE, get_status, run_rescan, run_scan
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "sample_fastapi_repo"
 
@@ -55,13 +56,15 @@ def test_status_after_a_scan():
     assert s.last_scan_at.endswith("+00:00")
 
 
-def test_status_passes_a_store_failure_through():
+def test_status_hides_the_store_error_from_the_client_and_logs_it(caplog):
+    detail = "connection refused: bolt://db.internal:7687"
+
     class Down(InMemoryServices):
         def status(self):
             return ServiceStatus(
                 store="neo4j",
                 store_ok=False,
-                store_error="connection refused",
+                store_error=detail,
                 repo="r",
                 scanning=False,
                 nodes={},
@@ -70,8 +73,12 @@ def test_status_passes_a_store_failure_through():
                 last_scan_at=None,
             )
 
-    s = get_status(Down())
-    assert s.store_ok is False and s.store_error == "connection refused"
+    with caplog.at_level(logging.WARNING):
+        s = get_status(Down())
+
+    assert s.store_ok is False and s.store_error == STORE_UNAVAILABLE
+    assert "db.internal" not in s.model_dump_json()
+    assert "db.internal" in caplog.text
     assert s.message is None
 
 
