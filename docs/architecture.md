@@ -73,6 +73,34 @@ graph until the next scan. `rescan` writes in one transaction and diffs
 against what is actually stored, so a failure leaves the previous graph intact
 and the next `rescan` repairs any earlier damage.
 
+## Authentication
+
+Over HTTP every request to `/mcp` needs `Authorization: Bearer <MCP_AUTH_TOKEN>`.
+Over stdio there is no auth: the client launches the process itself.
+
+- **Fail closed.** With `MCP_TRANSPORT=http` the server refuses to start (exit
+  code 2, message on stderr) if the token is missing, shorter than 32
+  characters, or contains whitespace. A test starts the real process and checks
+  this.
+- **Mechanism.** `auth.StaticBearerVerifier` is a FastMCP `TokenVerifier`.
+  Token and candidate are SHA-256 hashed and compared with
+  `hmac.compare_digest`, so neither content nor length shows up in timing. The
+  token is never logged, and a test checks the server log.
+- **Open paths.** FastMCP applies auth to the MCP endpoint only. `/healthz` is
+  open and reveals nothing but `{"status": "ok"}`; the Docker healthcheck uses it.
+- **Errors.** A wrong or missing token gets `401` with `WWW-Authenticate:
+  Bearer`. `ScanError` messages and `status.store_error` never carry server
+  paths or connection strings; the detail goes to the log. Unexpected
+  exceptions are masked (`mask_error_details=True`); deliberate `ToolError`
+  messages still reach the client.
+- **Rotation.** Change the variable and redeploy. There is one shared token.
+
+Limits: one token for all clients (no per-user identity or revocation), no
+OAuth, no rate limiting (a 32+ character random token makes guessing
+impractical), and the token travels in a header, so the deployment must
+terminate TLS in front of the server (Railway and Fly do). Never expose the
+plain-HTTP port on a public interface.
+
 ### Rescans
 
 `rescan` hashes every file, reparses the ones whose bytes changed, rebuilds
@@ -96,7 +124,7 @@ logs go to stderr. Configuration comes from the environment or `.env`:
 | `REPO_PATH` | Repo the server scans, a path on the machine running it |
 | `SCAN_EXCLUDE` | Comma-separated globs of repo-relative paths to skip |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
-| `MCP_AUTH_TOKEN` | Reserved for the remote HTTP server; unused over stdio |
+| `MCP_AUTH_TOKEN` | Bearer token clients must send to the HTTP server. Required when `MCP_TRANSPORT=http` (at least 32 characters, no whitespace); unused over stdio |
 
 Local setup: `docker compose up -d neo4j`, then `uv run python -m ripple.server`.
 `scripts/scan_repo.py --dry-run` builds the graph and prints the summary
