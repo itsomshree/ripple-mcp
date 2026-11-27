@@ -7,6 +7,7 @@ from typing import Annotated, TypeVar
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.server.auth import AuthProvider
 from neo4j.exceptions import DriverError, Neo4jError
 from pydantic import Field, ValidationError
 from starlette.requests import Request
@@ -15,6 +16,7 @@ from starlette.responses import JSONResponse
 from ripple.analysis.affected_tests import DEFAULT_MAX_HOPS as TESTS_HOPS
 from ripple.analysis.impact import DEFAULT_MAX_HOPS as IMPACT_HOPS
 from ripple.analysis.request_flow import DEFAULT_MAX_HOPS as FLOW_HOPS
+from ripple.auth import AuthConfigError, verifier_for
 from ripple.config import Settings, get_settings
 from ripple.scanner.repo_scanner import ScanError
 from ripple.services import Neo4jServices, ScanInProgress, Services
@@ -100,7 +102,7 @@ def _on_graph(
         raise _store_error(exc) from exc
 
 
-def build_server(services: Services) -> FastMCP:
+def build_server(services: Services, auth: AuthProvider | None = None) -> FastMCP:
     mcp = FastMCP(
         "ripple-mcp",
         instructions=(
@@ -112,6 +114,8 @@ def build_server(services: Services) -> FastMCP:
             "and `affected_tests`. Results carry `caveats`: relay them, because "
             "they say when an answer is only a lower bound."
         ),
+        auth=auth,
+        mask_error_details=True,
     )
 
     @mcp.custom_route("/healthz", methods=["GET"])
@@ -248,14 +252,18 @@ def run_server(mcp: FastMCP, settings: Settings) -> None:
 def main() -> None:
     try:
         settings = get_settings()
+        auth = verifier_for(settings)
     except ValidationError as exc:
         print(f"configuration error (see .env.example): {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
+    except AuthConfigError as exc:
+        print(f"configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
 
     configure_logging(settings.log_level)
     services = Neo4jServices(settings)
     try:
-        run_server(build_server(services), settings)
+        run_server(build_server(services, auth), settings)
     finally:
         services.close()
 
