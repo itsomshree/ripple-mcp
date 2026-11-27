@@ -90,7 +90,8 @@ class IncrementalScanner:
                 staged[rel] = parse_bytes(raw, rel, digest)
 
         if not seen:
-            raise ScanError(f"no readable Python files found under {root}")
+            logger.warning("no readable Python files found under %s", root)
+            raise ScanError("no readable Python files found")
 
         removed = sorted(self._hashes.keys() - seen.keys())
         added = sorted(staged.keys() - self._hashes.keys())
