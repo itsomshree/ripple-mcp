@@ -29,6 +29,7 @@ services:
       MCP_TRANSPORT: http
       MCP_HOST: 0.0.0.0
       MCP_PORT: "8000"
+      MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       REPO_PATH: /repo
       SCAN_EXCLUDE: ${SCAN_EXCLUDE:-}
