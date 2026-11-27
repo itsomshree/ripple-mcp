@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import TypeVar
 
@@ -10,6 +11,9 @@ from ripple.scanner.repo_scanner import ScanSummary
 from ripple.services import ScanInProgress, Services
 from ripple.tools._common import ToolResult, ToolStatus
 
+logger = logging.getLogger(__name__)
+
+STORE_UNAVAILABLE = "The graph store is unavailable; see the server log."
 _S = TypeVar("_S", bound=ScanSummary)
 
 
@@ -73,11 +77,13 @@ def run_rescan(services: Services) -> RescanToolResult:
 
 def get_status(services: Services) -> StatusResult:
     s = services.status()
+    if not s.store_ok:
+        logger.warning("graph store unavailable: %s", s.store_error)
     empty = not s.nodes
     return StatusResult(
         store=s.store,
         store_ok=s.store_ok,
-        store_error=s.store_error,
+        store_error=None if s.store_ok else STORE_UNAVAILABLE,
         repo=s.repo,
         scanning=s.scanning,
         graph_empty=empty,
